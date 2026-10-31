@@ -1212,17 +1212,18 @@ function resolveAgentApiCommand(appDataDir) {
     return { file: envExe, prefix: isDirect ? [] : ['agentapi'], shell: false };
   }
 
+  const geminiRoot = path.join(os.homedir(), '.gemini');
+  const candidateDirs = [
+    appDataDir || resolveAppDataDir(),
+    ...APP_CANDIDATES.map((app) => path.join(geminiRoot, app))
+  ].filter(Boolean);
+
   if (process.platform === 'win32') {
     const localApp = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
     const langServer = path.join(localApp, 'Programs', 'antigravity', 'resources', 'bin', 'language_server.exe');
     if (isFile(langServer)) {
       return { file: langServer, prefix: ['agentapi'], shell: false };
     }
-    const geminiRoot = path.join(os.homedir(), '.gemini');
-    const candidateDirs = [
-      appDataDir,
-      ...APP_CANDIDATES.map((app) => path.join(geminiRoot, app))
-    ].filter(Boolean);
     for (const d of candidateDirs) {
       const bat = path.join(d, 'bin', 'agentapi.bat');
       if (isFile(bat)) {
@@ -1239,10 +1240,34 @@ function resolveAgentApiCommand(appDataDir) {
     return { file: 'agentapi', prefix: [], shell: true };
   }
 
-  const nixBin = path.join(appDataDir || resolveAppDataDir(), 'bin', 'agentapi');
-  if (isFile(nixBin)) {
-    return { file: nixBin, prefix: [], shell: false };
+  for (const d of candidateDirs) {
+    const nixBin = path.join(d, 'bin', 'agentapi');
+    if (isFile(nixBin)) {
+      try {
+        const scriptContent = fs.readFileSync(nixBin, 'utf-8');
+        const binMatch = /"([^"\n]+language_server[^"\n]*)"/.exec(scriptContent);
+        if (binMatch && isFile(binMatch[1])) {
+          return { file: binMatch[1], prefix: ['agentapi'], shell: false };
+        }
+      } catch {}
+      return { file: nixBin, prefix: [], shell: false };
+    }
   }
+
+  const linuxCandidates = [
+    '/opt/Antigravity/resources/bin/language_server_linux_x64',
+    '/opt/Antigravity/resources/bin/language_server',
+    '/opt/antigravity/resources/bin/language_server_linux_x64',
+    '/opt/antigravity/resources/bin/language_server',
+    '/usr/share/antigravity/resources/bin/language_server',
+    path.join(os.homedir(), '.local', 'share', 'antigravity', 'resources', 'bin', 'language_server')
+  ];
+  for (const binPath of linuxCandidates) {
+    if (isFile(binPath)) {
+      return { file: binPath, prefix: ['agentapi'], shell: false };
+    }
+  }
+
   return { file: 'agentapi', prefix: [], shell: false };
 }
 
@@ -1303,21 +1328,22 @@ function rewriteUiHtmlLinks(html, token, conversationId) {
 
 function buildAgentHandoffRequest(entry, focusTopic) {
   const focusDirective = focusTopic
-    ? `Ο χρήστης έδωσε την εξής οδηγία / εστίαση για το νέο conversation:\n"${focusTopic}"\nΠροσάρμοσε το handoff prompt ώστε να εστιάζει ΑΠΟΚΛΕΙΣΤΙΚΑ σε αυτό που ζήτησε ο χρήστης, συμπεριλαμβάνοντας όλο το σχετικό τεχνικό context, τις επιλογές και την τελευταία μας συζήτηση.`
-    : `Συνόψισε την τρέχουσα εργασία, τι ολοκληρώθηκε, την τελευταία μας τεχνική ανάλυση/συζήτηση και το αμέσως επόμενο βήμα.`;
+    ? `User focus / instructions for the new conversation:\n"${focusTopic}"\nTailor the handoff prompt so it focuses strictly on what the user requested above, including all relevant technical context, trade-offs, and our latest discussion.`
+    : `Summarize the current task, what has been completed, our latest technical analysis or discussion, and the immediate next step.`;
 
   return (
     `[Context Health Smart Handoff]\n` +
-    `Φτιάξε τώρα ένα αυτοτελές (self-contained) handoff prompt για να συνεχίσουμε σε νέο conversation.\n\n` +
+    `Create a self-contained handoff prompt so we can continue seamlessly in a fresh conversation.\n\n` +
     `${focusDirective}\n\n` +
-    `ΑΥΣΤΗΡΟΙ ΚΑΝΟΝΕΣ:\n` +
-    `1. ΜΗΝ καλέσεις ΚΑΝΕΝΑ απολύτως tool (όχι read_file, όχι run_command, όχι search). Έχεις ήδη όλο το context στη μνήμη σου. Απάντησε ΑΜΕΣΩΣ.\n` +
-    `2. Τύλιξε το τελικό handoff prompt ΑΚΡΙΒΩΣ μέσα σε tags <HANDOFF_PROMPT> και </HANDOFF_PROMPT>. Μόλις ολοκληρώσεις την απάντησή σου, το Context Health sidecar θα διαβάσει αυτόματα το περιεχόμενο μέσα στα tags και θα το φορτώσει στο πεδίο του plugin για review.\n` +
-    `3. Μέσα στο <HANDOFF_PROMPT>...</HANDOFF_PROMPT> συμπεριέλαβε:\n` +
-    `   - Στην πρώτη γραμμή την οδηγία: "Όλο το απαραίτητο context βρίσκεται παρακάτω. ΜΗΝ ψάξεις σε αρχεία transcript.jsonl προηγούμενων conversations."\n` +
-    `   - Το Workspace (${entry.workspacePath || 'current workspace'}) και τα βασικά αρχεία που αφορά.\n` +
-    `   - Συμπυκνωμένα τι έχει γίνει μέχρι τώρα και όλη την τελευταία μας τεχνική ανάλυση, τις επιλογές ή τα ανοιχτά ερωτήματα.\n` +
-    `   - ΜΗΝ βάλεις το παλιό conversationId UUID.`
+    `STRICT RULES:\n` +
+    `1. Do NOT call any tools (no read_file, no run_command, no search). You already have all required context in memory. Respond immediately.\n` +
+    `2. Write the entire handoff prompt in the SAME language the user has been using in this conversation (or in the focus instructions above).\n` +
+    `3. Wrap the final handoff prompt strictly inside <HANDOFF_PROMPT> and </HANDOFF_PROMPT> tags. As soon as you finish your response, the Context Health sidecar will automatically extract the content inside those tags and load it into the review editor.\n` +
+    `4. Inside <HANDOFF_PROMPT>...</HANDOFF_PROMPT> include:\n` +
+    `   - On the very first line, a clear instruction (in the user's language) stating that all necessary context is provided below and the new agent must NOT search or read transcript.jsonl files from previous conversations.\n` +
+    `   - The Workspace (${entry.workspacePath || 'current workspace'}) and the key files involved.\n` +
+    `   - A concise summary of what has been done so far, plus our latest technical analysis, options, or open questions.\n` +
+    `   - Do NOT include the old conversationId UUID.`
   );
 }
 

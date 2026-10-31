@@ -12,6 +12,7 @@ const GEMINI_CONFIG_DIR = process.env.ANTIGRAVITY_CONFIG_DIR
   : path.join(os.homedir(), '.gemini', 'config');
 
 const PLUGIN_SRC_FILE = path.join(REPO_ROOT, 'plugin.json');
+const README_SRC_FILE = path.join(REPO_ROOT, 'README.md');
 const SIDECAR_SRC_DIR = path.join(REPO_ROOT, 'sidecars', 'context-health');
 
 const LEGACY_SIDECAR_DIR = path.join(GEMINI_CONFIG_DIR, 'sidecars', 'context-health');
@@ -106,6 +107,23 @@ function restartRunningSidecarServer() {
         }
       }
     } catch {}
+  } else if (process.platform !== 'win32' && killedPids.size === 0) {
+    try {
+      const out = execFileSync(
+        'pgrep',
+        ['-f', 'context-health.*/server\\.cjs'],
+        { encoding: 'utf-8', timeout: 3000 }
+      );
+      for (const line of String(out || '').split(/\r?\n/)) {
+        const pid = parseInt(line.trim(), 10);
+        if (pid > 0 && pid !== process.pid && !killedPids.has(pid)) {
+          try {
+            process.kill(pid, 'SIGTERM');
+            killedPids.add(pid);
+          } catch {}
+        }
+      }
+    } catch {}
   }
 }
 
@@ -133,6 +151,9 @@ function installAll() {
 
   fs.mkdirSync(SIDECAR_DEST_DIR, { recursive: true });
   fs.copyFileSync(PLUGIN_SRC_FILE, path.join(PLUGIN_DEST_DIR, 'plugin.json'));
+  if (fs.existsSync(README_SRC_FILE)) {
+    fs.copyFileSync(README_SRC_FILE, path.join(PLUGIN_DEST_DIR, 'README.md'));
+  }
 
   const sidecarManifest = JSON.parse(
     fs.readFileSync(path.join(SIDECAR_SRC_DIR, 'sidecar.json'), 'utf-8')
@@ -175,6 +196,7 @@ function uninstallAll() {
 
 function checkStatus() {
   const pluginOk = fs.existsSync(path.join(PLUGIN_DEST_DIR, 'plugin.json'));
+  const readmeOk = fs.existsSync(path.join(PLUGIN_DEST_DIR, 'README.md'));
   const sidecarOk =
     fs.existsSync(path.join(SIDECAR_DEST_DIR, 'sidecar.json')) &&
     fs.existsSync(path.join(SIDECAR_DEST_DIR, 'server.cjs')) &&
@@ -184,6 +206,7 @@ function checkStatus() {
     platform: process.platform,
     configDir: GEMINI_CONFIG_DIR,
     pluginInstalled: pluginOk,
+    readmeInstalled: readmeOk,
     sidecarInstalled: sidecarOk
   }, null, 2));
 
