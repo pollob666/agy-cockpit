@@ -132,6 +132,47 @@ function resolveAppDataDir() {
   return path.join(geminiRoot, 'antigravity');
 }
 
+function resolveProjectsDir() {
+  const envDir = process.env.ANTIGRAVITY_PROJECTS_DIR?.trim();
+  if (envDir) return envDir;
+  return path.join(os.homedir(), '.gemini', 'config', 'projects');
+}
+
+function extractProjectResourcePaths(rawProject) {
+  const out = [];
+  const seen = new Set();
+  const addUri = (uri) => {
+    if (!uri || typeof uri !== 'string') return;
+    const norm = normalizeWorkspacePath(uri);
+    if (!norm) return;
+    const key = workspaceComparisonKey(norm);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({ path: norm, key, label: getWorkspaceLabel(norm) });
+  };
+
+  const resources = rawProject?.projectResources?.resources;
+  if (Array.isArray(resources)) {
+    for (const r of resources) {
+      if (!r || typeof r !== 'object') continue;
+      addUri(r.folderUri || r.gitFolder?.folderUri || r.google3Folder?.folderUri);
+    }
+  }
+  const envs = rawProject?.environments?.environments;
+  if (Array.isArray(envs)) {
+    for (const env of envs) {
+      const envRes = env?.resources?.resources;
+      if (Array.isArray(envRes)) {
+        for (const r of envRes) {
+          if (!r || typeof r !== 'object') continue;
+          addUri(r.folderUri || r.gitFolder?.folderUri || r.google3Folder?.folderUri);
+        }
+      }
+    }
+  }
+  return out;
+}
+
 function resolveDataDir(appDataDir) {
   const envExecDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR?.trim();
   if (envExecDir) {
@@ -205,6 +246,7 @@ function getWorkspaceLabel(normPath) {
 }
 
 const gitRootLookupCache = new Map();
+const knownProjectRootPaths = new Map();
 
 function findGitOrWorkspaceRoot(rawCandidatePath) {
   const norm = normalizeWorkspacePath(rawCandidatePath);
@@ -234,6 +276,11 @@ function findGitOrWorkspaceRoot(rawCandidatePath) {
         break;
       }
     } catch {}
+    const currKey = workspaceComparisonKey(curr);
+    if (knownProjectRootPaths.has(currKey)) {
+      foundRoot = knownProjectRootPaths.get(currKey) || curr;
+      break;
+    }
     const parent = path.posix.dirname(curr);
     if (parent === curr) break;
     curr = parent;
@@ -339,6 +386,7 @@ function createEmptyEntry(convId) {
     lastActiveIso: '',
     lastActiveMs: 0,
     lastViewMs: 0,
+    archived: false,
     isSubagent: false,
     parentConvId: '',
     spawnedSubagentIds: [],
@@ -348,6 +396,7 @@ function createEmptyEntry(convId) {
     promptCount: 0,
     currentTokens: 0,
     lastPlannerTokens: 0,
+    baseContextTokens: 0,
     totalInputTokens: 0,
     totalCacheReadTokens: 0,
     totalOutputTokens: 0,
@@ -478,6 +527,10 @@ function processTranscriptLine(entry, line, isFirstLine) {
     const outTok = typeof obj.output_tokens === 'number' && obj.output_tokens > 0 ? obj.output_tokens : 0;
     const totalTok = inTok + cacheTok;
     if (totalTok > 0) {
+      if (!entry.baseContextTokens) {
+        const firstPromptTok = entry.firstPrompt ? Math.round(entry.firstPrompt.length / 4) : 0;
+        entry.baseContextTokens = Math.max(4000, totalTok - firstPromptTok);
+      }
       entry.lastPlannerTokens = totalTok;
       entry.currentTokens = totalTok;
     }
@@ -546,6 +599,10 @@ function processTranscriptLine(entry, line, isFirstLine) {
     if (createdAt) {
       entry.lastCompactMs = createdMs || entry.lastActiveMs;
     }
+    if (createdAt && createdMs >= entry.lastActiveMs) {
+      entry.lastActiveIso = createdAt;
+      entry.lastActiveMs = createdMs;
+    }
     entry.promptsSinceLastCompact = 0;
     if (entry.lastPlannerTokens > 0) {
       entry.compactTriggerTokens.push(entry.lastPlannerTokens);
@@ -553,6 +610,14 @@ function processTranscriptLine(entry, line, isFirstLine) {
         entry.compactTriggerTokens.shift();
       }
     }
+    const truncMatch = /<truncated\s+(\d+)\s+bytes>/i.exec(content);
+    const extraBytes = truncMatch ? (parseInt(truncMatch[1], 10) || 0) : 0;
+    const summaryTokens = Math.max(500, Math.round((content.length + extraBytes) / 4));
+    const baseTok = entry.baseContextTokens > 0 ? entry.baseContextTokens : 21000;
+    const estimatedPostCompact = baseTok + summaryTokens;
+    entry.currentTokens = entry.lastPlannerTokens > 0
+      ? Math.min(entry.lastPlannerTokens, estimatedPostCompact)
+      : estimatedPostCompact;
     const isTruncatedContent =
       (Array.isArray(obj.truncated_fields) && obj.truncated_fields.includes('content')) ||
       content.includes('\n<truncated ');
@@ -642,7 +707,7 @@ function extractTitleFromPbtxt(raw) {
 }
 
 function extractAnnotationFromPbtxt(raw) {
-  if (!raw || typeof raw !== 'string') return { title: '', lastViewMs: 0 };
+  if (!raw || typeof raw !== 'string') return { title: '', lastViewMs: 0, archived: false };
   const title = extractTitleFromPbtxt(raw);
   const viewMatch = /\blast_user_view_time\s*:\s*\{\s*seconds\s*:\s*(\d+)(?:\s+nanos\s*:\s*(\d+))?\s*\}/.exec(raw);
   let lastViewMs = 0;
@@ -653,7 +718,8 @@ function extractAnnotationFromPbtxt(raw) {
       lastViewMs = sec * 1000 + Math.floor(nanos / 1e6);
     }
   }
-  return { title, lastViewMs };
+  const archived = /\barchived\s*:\s*true\b/i.test(raw);
+  return { title, lastViewMs, archived };
 }
 
 function rebuildSearchCorpus(entry) {
@@ -1111,7 +1177,7 @@ class GitRepoCache {
     }
 
     const commits = record.commits;
-    const graceCutoffMs = entry.lastActiveMs + 45000;
+    const graceCutoffMs = entry.lastActiveMs + 1000;
     if (commits[0].tsMs <= graceCutoffMs) {
       return {
         hasGit: true,
@@ -1268,6 +1334,7 @@ class ContextHealthServer {
     this.appDataDir = options.appDataDir || resolveAppDataDir();
     this.brainDir = options.brainDir || path.join(this.appDataDir, 'brain');
     this.dataDir = options.dataDir || resolveDataDir(this.appDataDir);
+    this.projectsDir = options.projectsDir || resolveProjectsDir();
     this.uiHtmlPath = options.uiHtmlPath || path.join(__dirname, 'ui.html');
 
     const envPort = parseInt(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || '', 10);
@@ -1286,6 +1353,11 @@ class ContextHealthServer {
     this.metadataWorkspaceCache = new Map();
     this.annotationTitleCache = new Map();
     this.annotationsDir = path.join(this.appDataDir, 'annotations');
+    this.projectsRegistry = new Map();
+    this.projectFileMtimes = new Map();
+    this.lastProjectsScanMs = 0;
+    this.lastProjectsDirMtimeMs = 0;
+    this.projectsRev = 1;
     this.gitCache = new GitRepoCache();
     this.stateVersion = 1;
     this.transcriptRev = 1;
@@ -1331,7 +1403,7 @@ class ContextHealthServer {
     if (isFile(this.indexCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.indexCachePath, 'utf-8'));
-        if (raw && raw.version === 10 && Array.isArray(raw.entries)) {
+        if (raw && raw.version === 11 && Array.isArray(raw.entries)) {
           for (const item of raw.entries) {
             if (item && typeof item.id === 'string') {
               rebuildSearchCorpus(item);
@@ -1351,7 +1423,7 @@ class ContextHealthServer {
     this.indexCacheDirty = false;
     try {
       const entries = [...this.convCache.values()];
-      writeJsonAtomic(this.indexCachePath, { version: 10, savedAt: Date.now(), entries });
+      writeJsonAtomic(this.indexCachePath, { version: 11, savedAt: Date.now(), entries });
     } catch {}
   }
 
@@ -1401,22 +1473,27 @@ class ContextHealthServer {
       stat = null;
     }
     if (!stat || !stat.isFile()) {
-      const emptyItem = { mtimeMs: 0, title: '', lastViewMs: 0, checkedAtMs: now };
+      const emptyItem = { mtimeMs: 0, title: '', lastViewMs: 0, archived: false, checkedAtMs: now };
       this.annotationTitleCache.set(convId, emptyItem);
       return emptyItem;
     }
-    if (cached && cached.mtimeMs === stat.mtimeMs && typeof cached.lastViewMs === 'number') {
+    if (
+      cached &&
+      cached.mtimeMs === stat.mtimeMs &&
+      typeof cached.lastViewMs === 'number' &&
+      typeof cached.archived === 'boolean'
+    ) {
       cached.checkedAtMs = now;
       return cached;
     }
     try {
       const raw = fs.readFileSync(pbtxtPath, 'utf-8');
-      const { title, lastViewMs } = extractAnnotationFromPbtxt(raw);
-      const item = { mtimeMs: stat.mtimeMs, title, lastViewMs, checkedAtMs: now };
+      const { title, lastViewMs, archived } = extractAnnotationFromPbtxt(raw);
+      const item = { mtimeMs: stat.mtimeMs, title, lastViewMs, archived, checkedAtMs: now };
       this.annotationTitleCache.set(convId, item);
       return item;
     } catch {
-      return cached || { mtimeMs: 0, title: '', lastViewMs: 0, checkedAtMs: now };
+      return cached || { mtimeMs: 0, title: '', lastViewMs: 0, archived: false, checkedAtMs: now };
     }
   }
 
@@ -1430,6 +1507,11 @@ class ContextHealthServer {
     }
     if (annot.lastViewMs && entry.lastViewMs !== annot.lastViewMs) {
       entry.lastViewMs = annot.lastViewMs;
+      changed = true;
+    }
+    const nextArchived = Boolean(annot.archived);
+    if (Boolean(entry.archived) !== nextArchived) {
+      entry.archived = nextArchived;
       changed = true;
     }
     if (!entry.workspacePath && this.metadataWorkspaceCache.has(convId)) {
@@ -1450,6 +1532,176 @@ class ContextHealthServer {
       changed = true;
     }
     return changed;
+  }
+
+  refreshProjectsRegistry(force = false) {
+    const now = Date.now();
+    if (!force && now - this.lastProjectsScanMs < 1500) {
+      return;
+    }
+    this.lastProjectsScanMs = now;
+
+    let dirStat = null;
+    try {
+      dirStat = fs.statSync(this.projectsDir, { throwIfNoEntry: false });
+    } catch {}
+
+    if (!dirStat || !dirStat.isDirectory()) {
+      if (this.projectsRegistry.size > 0) {
+        this.projectsRegistry.clear();
+        this.projectFileMtimes.clear();
+        knownProjectRootPaths.clear();
+        gitRootLookupCache.clear();
+        this.projectsRev += 1;
+        this.cachedCardsState = null;
+      }
+      return;
+    }
+
+    let dirents = [];
+    try {
+      dirents = fs.readdirSync(this.projectsDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    let changed = false;
+    const seenIds = new Set();
+
+    for (const d of dirents) {
+      if (!d.isFile() || !d.name.toLowerCase().endsWith('.json')) continue;
+      const projId = d.name.slice(0, -5).toLowerCase();
+      if (!UUID_RE.test(projId)) continue;
+      seenIds.add(projId);
+
+      const filePath = path.join(this.projectsDir, d.name);
+      let fStat = null;
+      try {
+        fStat = fs.statSync(filePath, { throwIfNoEntry: false });
+      } catch {}
+      if (!fStat || !fStat.isFile()) continue;
+
+      const prevMtime = this.projectFileMtimes.get(projId);
+      if (!force && prevMtime === fStat.mtimeMs && this.projectsRegistry.has(projId)) {
+        continue;
+      }
+
+      try {
+        const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        if (!raw || typeof raw !== 'object') continue;
+        const resources = extractProjectResourcePaths(raw);
+        const primary = resources[0] || { path: '', key: '', label: '' };
+        const name = (typeof raw.name === 'string' && raw.name.trim()) || primary.label || projId;
+        this.projectsRegistry.set(projId, {
+          id: projId,
+          name,
+          archived: Boolean(raw.archived),
+          isWorkspaceOnly: Boolean(raw.isWorkspaceOnly),
+          resources,
+          primaryPath: primary.path,
+          primaryKey: primary.key || projId
+        });
+        this.projectFileMtimes.set(projId, fStat.mtimeMs);
+        changed = true;
+      } catch {}
+    }
+
+    for (const oldId of this.projectsRegistry.keys()) {
+      if (!seenIds.has(oldId)) {
+        this.projectsRegistry.delete(oldId);
+        this.projectFileMtimes.delete(oldId);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      knownProjectRootPaths.clear();
+      for (const proj of this.projectsRegistry.values()) {
+        for (const r of proj.resources || []) {
+          if (r && r.key && r.path) {
+            knownProjectRootPaths.set(r.key, r.path);
+          }
+        }
+      }
+      gitRootLookupCache.clear();
+      this.projectsRev += 1;
+      this.cachedCardsState = null;
+    }
+  }
+
+  matchProjectForWorkspace(workspacePath) {
+    if (!workspacePath || this.projectsRegistry.size === 0) return null;
+    const wsKey = workspaceComparisonKey(normalizeWorkspacePath(workspacePath));
+    if (!wsKey) return null;
+
+    let bestProj = null;
+    let bestKeyLen = -1;
+    let bestResIdx = 9999;
+    let bestNameMatch = 0;
+
+    for (const proj of this.projectsRegistry.values()) {
+      if (!Array.isArray(proj.resources)) continue;
+      const projNameLower = (proj.name || '').toLowerCase();
+      for (let i = 0; i < proj.resources.length; i++) {
+        const res = proj.resources[i];
+        if (!res || !res.key) continue;
+        if (wsKey === res.key || wsKey.startsWith(res.key + '/')) {
+          const keyLen = res.key.length;
+          const nameMatch = (res.label || '').toLowerCase() === projNameLower ? 1 : 0;
+          const isBetter =
+            keyLen > bestKeyLen ||
+            (keyLen === bestKeyLen && i < bestResIdx) ||
+            (keyLen === bestKeyLen && i === bestResIdx && nameMatch > bestNameMatch);
+          if (isBetter) {
+            bestProj = proj;
+            bestKeyLen = keyLen;
+            bestResIdx = i;
+            bestNameMatch = nameMatch;
+          }
+        }
+      }
+    }
+    return bestProj;
+  }
+
+  setProjectArchived(projectId, archived) {
+    const cleanId = (projectId || '').trim().toLowerCase();
+    if (!UUID_RE.test(cleanId)) {
+      return { status: 400, body: { error: 'Invalid project id' } };
+    }
+    const filePath = path.join(this.projectsDir, `${cleanId}.json`);
+    if (!isFile(filePath)) {
+      return { status: 404, body: { error: 'Project file not found' } };
+    }
+    try {
+      const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (!raw || typeof raw !== 'object') {
+        return { status: 500, body: { error: 'Malformed project file' } };
+      }
+      const nextArchived = Boolean(archived);
+      if (nextArchived) {
+        raw.archived = true;
+      } else {
+        delete raw.archived;
+      }
+      writeJsonAtomic(filePath, raw, undefined, true);
+      this.refreshProjectsRegistry(true);
+      this.cachedCardsState = null;
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          projectId: cleanId,
+          archived: nextArchived,
+          name: raw.name || ''
+        }
+      };
+    } catch (err) {
+      return {
+        status: 500,
+        body: { error: err instanceof Error ? err.message : String(err) }
+      };
+    }
   }
 
   refreshSingleEntry(convId) {
@@ -1659,14 +1911,25 @@ class ContextHealthServer {
       : null;
 
     const drift = this.gitCache.computeDriftForConversation(entry);
+    const matchedProj = this.matchProjectForWorkspace(entry.workspacePath || '');
+    const effectiveWsPath = matchedProj
+      ? (matchedProj.primaryPath || entry.workspacePath || '')
+      : (entry.workspacePath || '');
+    const effectiveWsKey = matchedProj
+      ? (matchedProj.primaryKey || workspaceComparisonKey(effectiveWsPath))
+      : workspaceComparisonKey(effectiveWsPath);
+    const effectiveWsName = matchedProj
+      ? matchedProj.name
+      : getWorkspaceLabel(effectiveWsPath);
 
     return {
       id: entry.id,
       isSubagent: !!entry.isSubagent,
       subagentTokens: subagentTokens ? (subagentTokens.get(entry.id) || 0) : 0,
-      workspacePath: entry.workspacePath || '',
-      workspaceKey: workspaceComparisonKey(entry.workspacePath || ''),
-      workspaceName: getWorkspaceLabel(entry.workspacePath || ''),
+      projectId: matchedProj ? matchedProj.id : '',
+      workspacePath: effectiveWsPath,
+      workspaceKey: effectiveWsKey,
+      workspaceName: effectiveWsName,
       lastActiveIso: entry.lastActiveIso || '',
       lastActiveMs: entry.lastActiveMs || 0,
       lastViewMs: entry.lastViewMs || 0,
@@ -1718,6 +1981,9 @@ class ContextHealthServer {
       ''
     ).trim().toLowerCase();
 
+    this.refreshProjectsRegistry(isForce);
+    const hasProjectsRegistry = this.projectsRegistry.size > 0;
+
     const { sortedEntries, subagentTokens, globalObservedCeiling } = this.refreshIndex({
       activeConvId: hostConvId,
       workspaceUris,
@@ -1728,57 +1994,113 @@ class ContextHealthServer {
       ? resolveCanonicalWorkspace(workspaceUris[0])
       : (sortedEntries.find((e) => e.id === hostConvId)?.workspacePath || '');
 
-    const activeWorkspaceKey = workspaceComparisonKey(detectedActiveWorkspaceNorm);
-    const visibleEntries = sortedEntries.filter((e) => !e.isSubagent || e.id === hostConvId);
+    const matchedActiveProj = this.matchProjectForWorkspace(detectedActiveWorkspaceNorm);
+    const activeWorkspaceKey = matchedActiveProj
+      ? (matchedActiveProj.archived ? '' : (matchedActiveProj.primaryKey || matchedActiveProj.id))
+      : (hasProjectsRegistry && detectedActiveWorkspaceNorm ? '' : workspaceComparisonKey(detectedActiveWorkspaceNorm));
+
+    const archivedConvCounts = new Map();
+    const visibleEntries = sortedEntries.filter((e) => {
+      if (e.isSubagent && e.id !== hostConvId) return false;
+      if (e.archived && e.id !== hostConvId) return false;
+      if (hasProjectsRegistry && e.workspacePath) {
+        const proj = this.matchProjectForWorkspace(e.workspacePath);
+        if (!proj) return false;
+        if (proj.archived) {
+          if (!e.isSubagent) {
+            archivedConvCounts.set(proj.id, (archivedConvCounts.get(proj.id) || 0) + 1);
+          }
+          return false;
+        }
+      }
+      return true;
+    });
 
     this.gitCache.checkKnownRepos(isForce);
 
     let cards;
     let workspaces;
+    let archivedProjects;
     if (
       !isForce &&
       this.cachedCardsState &&
       this.cachedCardsState.transcriptRev === this.transcriptRev &&
+      this.cachedCardsState.projectsRev === this.projectsRev &&
       this.cachedCardsState.gitRev === this.gitCache.revision &&
       this.cachedCardsState.hostConvId === hostConvId &&
       this.cachedCardsState.activeWorkspaceKey === activeWorkspaceKey
     ) {
       cards = this.cachedCardsState.cards;
       workspaces = this.cachedCardsState.workspaces;
+      archivedProjects = this.cachedCardsState.archivedProjects;
     } else {
       cards = visibleEntries.map((entry) =>
         this.buildConversationCard(entry, globalObservedCeiling, subagentTokens)
       );
 
       if (UUID_RE.test(hostConvId) && !cards.some((c) => c.id === hostConvId)) {
-        const placeholderEntry = createEmptyEntry(hostConvId);
-        placeholderEntry.workspacePath =
+        const candidateWs =
           detectedActiveWorkspaceNorm || this.metadataWorkspaceCache.get(hostConvId) || '';
-        cards.unshift(this.buildConversationCard(placeholderEntry, globalObservedCeiling, subagentTokens));
+        const candidateProj = this.matchProjectForWorkspace(candidateWs);
+        const isArchivedOrOrphan =
+          hasProjectsRegistry && candidateWs && (!candidateProj || candidateProj.archived);
+        if (!isArchivedOrOrphan) {
+          const placeholderEntry = createEmptyEntry(hostConvId);
+          placeholderEntry.workspacePath = candidateWs;
+          cards.unshift(this.buildConversationCard(placeholderEntry, globalObservedCeiling, subagentTokens));
+        }
       }
 
       const workspaceMap = new Map();
       for (const c of cards) {
         if (c.isSubagent) continue;
         const key = c.workspaceKey || '__unscoped__';
+        const activityMs = Math.max(c.lastActiveMs || 0, c.lastViewMs || 0);
         const existing = workspaceMap.get(key);
         if (existing) {
           existing.count += 1;
+          if (activityMs > existing.lastActiveMs) {
+            existing.lastActiveMs = activityMs;
+          }
+          if (!existing.projectId && c.projectId) {
+            existing.projectId = c.projectId;
+          }
         } else {
           workspaceMap.set(key, {
             key,
+            projectId: c.projectId || '',
             path: c.workspacePath || '',
             name: c.workspaceName,
-            count: 1
+            count: 1,
+            lastActiveMs: activityMs
           });
         }
       }
-      workspaces = [...workspaceMap.values()];
+      workspaces = [...workspaceMap.values()].sort((a, b) => {
+        if (a.key === '__unscoped__') return 1;
+        if (b.key === '__unscoped__') return -1;
+        return (b.lastActiveMs || 0) - (a.lastActiveMs || 0);
+      });
+
+      archivedProjects = [];
+      for (const proj of this.projectsRegistry.values()) {
+        if (proj.archived) {
+          archivedProjects.push({
+            id: proj.id,
+            name: proj.name,
+            path: proj.primaryPath || '',
+            key: proj.primaryKey || proj.id,
+            count: archivedConvCounts.get(proj.id) || 0
+          });
+        }
+      }
+      archivedProjects.sort((a, b) => a.name.localeCompare(b.name));
 
       const signature = JSON.stringify({
         hostConvId,
         activeWorkspaceKey,
         globalObservedCeiling,
+        archivedIds: archivedProjects.map((p) => [p.id, p.count]),
         items: cards.map((c) => [
           c.id,
           c.title,
@@ -1792,6 +2114,7 @@ class ContextHealthServer {
           c.totalTokens,
           c.subagentTokens,
           c.workspaceKey,
+          c.projectId,
           c.git.commitsBehind
         ])
       });
@@ -1803,11 +2126,13 @@ class ContextHealthServer {
 
       this.cachedCardsState = {
         transcriptRev: this.transcriptRev,
+        projectsRev: this.projectsRev,
         gitRev: this.gitCache.revision,
         hostConvId,
         activeWorkspaceKey,
         cards,
-        workspaces
+        workspaces,
+        archivedProjects
       };
     }
 
@@ -1861,6 +2186,7 @@ class ContextHealthServer {
       hostConversationId: hostConvId || null,
       activeWorkspaceKey: activeWorkspaceKey || '',
       workspaces,
+      archivedProjects,
       conversations: cards,
       searchMatches
     };
@@ -2027,6 +2353,13 @@ class ContextHealthServer {
     if (req.method === 'GET' && pathname === '/api/handoff-summary') {
       const { status, body } = this.handleHandoffSummary(query);
       sendJson(res, status, body);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/project-archive') {
+      const body = await this.readJsonBody(req);
+      const { status, body: outBody } = this.setProjectArchived(body.projectId, body.archived);
+      sendJson(res, status, outBody);
       return;
     }
 

@@ -179,7 +179,7 @@
     .drift-warn {
       color: #fb923c;
       font-size: 12.5px;
-      font-weight: 500;
+      font-weight: 400;
     }
 
     .meter-group {
@@ -406,6 +406,29 @@
       align-items: center;
       gap: 5px;
       flex-wrap: wrap;
+      max-height: 86px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding-right: 2px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+    }
+
+    .scope-tabs::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .scope-tabs::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .scope-tabs::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.14);
+      border-radius: 4px;
+    }
+
+    .scope-tabs::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.26);
     }
 
     .scope-tab {
@@ -429,6 +452,17 @@
       color: var(--foreground, #ededed);
       border-color: var(--border, rgba(255, 255, 255, 0.14));
       font-weight: 500;
+    }
+
+    .scope-tab-archived {
+      border: 1px dashed var(--border, rgba(255, 255, 255, 0.14));
+      color: var(--muted-foreground, #777777);
+      font-size: 12px;
+    }
+
+    .scope-tab-archived:hover {
+      border-color: var(--muted-foreground, #999999);
+      color: var(--foreground, #ededed);
     }
 
     .conv-row {
@@ -682,6 +716,98 @@
       opacity: 1;
       transform: translateY(0);
     }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(2px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 9500;
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal-card {
+      width: 100%;
+      max-width: 340px;
+      background: var(--card, #141414);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+      border-radius: 10px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+    }
+
+    .modal-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--foreground, #ededed);
+    }
+
+    .modal-body {
+      font-size: 12.5px;
+      line-height: 1.45;
+      color: var(--muted-foreground, #999999);
+    }
+
+    .modal-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+
+    .modal-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 9px;
+      background: var(--background, #0a0a0a);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+      border-radius: 6px;
+    }
+
+    .modal-row-info {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      min-width: 0;
+    }
+
+    .modal-row-name {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--foreground, #ededed);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .modal-row-sub {
+      font-size: 11.5px;
+      color: var(--muted-foreground, #777777);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .modal-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+      margin-top: 2px;
+    }
   </style>
 </head>
 <body>
@@ -722,6 +848,7 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="modal-backdrop"></div>
   <div class="toast" id="toast"></div>
 
   <script>
@@ -749,6 +876,7 @@
         lastFetchedQuery: '',
         conversations: [],
         workspaces: [],
+        archivedProjects: [],
         activeWorkspaceKey: '',
         searchMatches: null,
         expandedDetails: new Map(),
@@ -768,6 +896,7 @@
       const sectionOtherEl = document.getElementById('section-other');
       const statusDotEl = document.getElementById('status-dot');
       const btnRefresh = document.getElementById('btn-refresh');
+      const modalBackdropEl = document.getElementById('modal-backdrop');
       const toastEl = document.getElementById('toast');
 
       function showToast(msg) {
@@ -1288,8 +1417,14 @@
           const otherCount = countsByWs.get(ws.key) || 0;
           if (otherCount === 0 && effectiveScope !== ws.key) continue;
           const isActive = effectiveScope === ws.key;
+          const projAttrs = ws.projectId
+            ? ' data-project-id="' + escapeHtml(ws.projectId) + '" data-project-name="' + escapeHtml(ws.name) + '"'
+            : '';
+          const tip = ws.projectId
+            ? (ws.path ? ws.path + ' · Right-click to archive project' : 'Right-click to archive project')
+            : (ws.path || '');
           html +=
-            '<button class="scope-tab ' + (isActive ? 'active' : '') + '" data-ws="' + escapeHtml(ws.key) + '" title="' + escapeHtml(ws.path) + '">' +
+            '<button class="scope-tab ' + (isActive ? 'active' : '') + '" data-ws="' + escapeHtml(ws.key) + '"' + projAttrs + ' title="' + escapeHtml(tip) + '">' +
               escapeHtml(ws.name) + ' (' + otherCount + ')' +
             '</button>';
         }
@@ -1298,6 +1433,13 @@
           '<button class="scope-tab ' + (effectiveScope === '__all__' ? 'active' : '') + '" data-ws="__all__">' +
             'All (' + otherMain.length + ')' +
           '</button>';
+
+        if (Array.isArray(state.archivedProjects) && state.archivedProjects.length > 0) {
+          html +=
+            '<button class="scope-tab scope-tab-archived" data-action="open-archived-modal" title="View and unarchive hidden projects">' +
+              'Archived (' + state.archivedProjects.length + ')' +
+            '</button>';
+        }
 
         if (workspacePillsEl.innerHTML !== html) {
           workspacePillsEl.innerHTML = html;
@@ -1511,6 +1653,7 @@
           }
           state.activeWorkspaceKey = data.activeWorkspaceKey || '';
           state.workspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
+          state.archivedProjects = Array.isArray(data.archivedProjects) ? data.archivedProjects : [];
           state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
           state.searchMatches = data.searchMatches || null;
 
@@ -1723,7 +1866,111 @@
         renderAll();
       }
 
+      function closeModal() {
+        if (!modalBackdropEl) return;
+        modalBackdropEl.classList.remove('open');
+        modalBackdropEl.innerHTML = '';
+      }
+
+      function openArchiveConfirmModal(projectId, projectName, wsKey) {
+        if (!modalBackdropEl || !projectId) return;
+        const safeName = escapeHtml(projectName || 'this project');
+        modalBackdropEl.innerHTML =
+          '<div class="modal-card" role="dialog" aria-modal="true">' +
+            '<div class="modal-title">Archive project "' + safeName + '"?</div>' +
+            '<div class="modal-body">' +
+              'This will temporarily hide <strong>' + safeName + '</strong> and its conversations from both the Antigravity sidebar and Context Health. Nothing is deleted, and you can unarchive it anytime.' +
+            '</div>' +
+            '<div class="modal-actions">' +
+              '<button class="btn-secondary" data-action="close-modal">Cancel</button>' +
+              '<button class="btn-primary" data-action="confirm-archive-project" data-project-id="' + escapeHtml(projectId) + '" data-project-name="' + escapeHtml(projectName || '') + '" data-ws-key="' + escapeHtml(wsKey || '') + '">Archive Project</button>' +
+            '</div>' +
+          '</div>';
+        modalBackdropEl.classList.add('open');
+      }
+
+      function openArchivedProjectsModal() {
+        if (!modalBackdropEl) return;
+        const list = Array.isArray(state.archivedProjects) ? state.archivedProjects : [];
+        if (list.length === 0) {
+          closeModal();
+          return;
+        }
+        let rowsHtml = '';
+        for (const p of list) {
+          const chatLabel = p.count === 1 ? '1 chat' : (p.count + ' chats');
+          rowsHtml +=
+            '<div class="modal-row">' +
+              '<div class="modal-row-info">' +
+                '<span class="modal-row-name">' + escapeHtml(p.name) + '</span>' +
+                '<span class="modal-row-sub">' + escapeHtml(chatLabel + (p.path ? ' · ' + p.path : '')) + '</span>' +
+              '</div>' +
+              '<button class="btn-primary" data-action="confirm-unarchive-project" data-project-id="' + escapeHtml(p.id) + '" data-project-name="' + escapeHtml(p.name) + '">Unarchive</button>' +
+            '</div>';
+        }
+        modalBackdropEl.innerHTML =
+          '<div class="modal-card" role="dialog" aria-modal="true">' +
+            '<div class="modal-title">Archived Projects (' + list.length + ')</div>' +
+            '<div class="modal-body">Archived projects are hidden from both the Antigravity sidebar and Context Health. Click Unarchive to restore a project:</div>' +
+            '<div class="modal-list">' + rowsHtml + '</div>' +
+            '<div class="modal-actions">' +
+              '<button class="btn-secondary" data-action="close-modal">Close</button>' +
+            '</div>' +
+          '</div>';
+        modalBackdropEl.classList.add('open');
+      }
+
+      async function handleSetProjectArchived(projectId, projectName, archived, wsKey) {
+        if (!projectId) return;
+        try {
+          const res = await apiFetch('/api/project-archive', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projectId, archived: Boolean(archived) })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) {
+            throw new Error(data.error || 'Failed to update project');
+          }
+          if (archived && wsKey && state.selectedWorkspaceKey === wsKey) {
+            state.selectedWorkspaceKey = '__auto__';
+          }
+          await fetchStatus(true);
+          if (!archived && state.archivedProjects.length > 0 && modalBackdropEl.classList.contains('open')) {
+            openArchivedProjectsModal();
+          } else {
+            closeModal();
+          }
+          showToast((archived ? 'Archived ' : 'Unarchived ') + (projectName || 'project'));
+        } catch (err) {
+          closeModal();
+          showToast('Error: ' + err.message);
+        }
+      }
+
+      document.addEventListener('contextmenu', (e) => {
+        const wsBtn = e.target.closest('[data-ws][data-project-id]');
+        if (wsBtn) {
+          e.preventDefault();
+          const projId = wsBtn.getAttribute('data-project-id');
+          const projName = wsBtn.getAttribute('data-project-name') || '';
+          const wsKey = wsBtn.getAttribute('data-ws') || '';
+          openArchiveConfirmModal(projId, projName, wsKey);
+          return;
+        }
+        const archBtn = e.target.closest('[data-action="open-archived-modal"]');
+        if (archBtn) {
+          e.preventDefault();
+          openArchivedProjectsModal();
+        }
+      });
+
       document.addEventListener('click', (e) => {
+        if (modalBackdropEl && e.target === modalBackdropEl) {
+          closeModal();
+          return;
+        }
+
         const wsBtn = e.target.closest('[data-ws]');
         if (wsBtn) {
           state.selectedWorkspaceKey = wsBtn.getAttribute('data-ws');
@@ -1735,6 +1982,28 @@
         if (!actionBtn) return;
         const action = actionBtn.getAttribute('data-action');
         const convId = actionBtn.getAttribute('data-id');
+
+        if (action === 'close-modal') {
+          closeModal();
+          return;
+        }
+        if (action === 'open-archived-modal') {
+          openArchivedProjectsModal();
+          return;
+        }
+        if (action === 'confirm-archive-project') {
+          const projId = actionBtn.getAttribute('data-project-id');
+          const projName = actionBtn.getAttribute('data-project-name') || '';
+          const wsKey = actionBtn.getAttribute('data-ws-key') || '';
+          handleSetProjectArchived(projId, projName, true, wsKey);
+          return;
+        }
+        if (action === 'confirm-unarchive-project') {
+          const projId = actionBtn.getAttribute('data-project-id');
+          const projName = actionBtn.getAttribute('data-project-name') || '';
+          handleSetProjectArchived(projId, projName, false, '');
+          return;
+        }
 
         if (action === 'toggle-section') {
           const sec = actionBtn.getAttribute('data-section');
@@ -1801,6 +2070,11 @@
       });
 
       document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && modalBackdropEl && modalBackdropEl.classList.contains('open')) {
+          e.preventDefault();
+          closeModal();
+          return;
+        }
         if (e.target && e.target.classList && e.target.classList.contains('handoff-input')) {
           if (e.key === 'Escape') {
             e.preventDefault();

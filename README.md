@@ -1,6 +1,6 @@
 # Antigravity Context Health (`context-health`)
 
-Cross-platform **Antigravity Sidecar UI Pane** and **PreInvocation Warning Hook** for **Windows** and **Linux** (pure Node.js, zero external dependencies).
+Cross-platform **Antigravity Sidecar UI Pane** for **Windows** and **Linux** (pure Node.js, zero external dependencies).
 
 Monitors conversation context pollution caused by successive context compactions (`CHECKPOINT` events) and repository Git drift (`commits behind HEAD`), and provides one-click context handoffs into fresh conversations.
 
@@ -38,11 +38,6 @@ Monitors conversation context pollution caused by successive context compactions
 - **Step 1 (Optional Focus & AI Generation)**: Opens a large editable textarea where you can optionally specify focus instructions, then sends a `<HANDOFF_PROMPT>` request to the conversation's main agent via `window.sidecar.agent.sendMessage(...)`.
 - **Step 2 (In-Place Review, Edit & Launch)**: Once the agent generates the `<HANDOFF_PROMPT>` block, it is loaded directly into the same textarea in the plugin so you can review and edit it in place before clicking **Start New Chat** (`window.sidecar.agent.startConversation(...)`) or **Copy**.
 
-### 6. Lightweight `PreInvocation` Hook (`< 20 ms`)
-- Runs before each user turn via `~/.gemini/config/hooks.json`.
-- Stays completely silent (`{}`) when `compacts < 10` and `commitsBehind === 0`.
-- When `compacts >= 10` (**Polluted**) or `commitsBehind >= 1`, outputs a transient `injectSteps: [{ ephemeralMessage: ... }]` instruction so the agent prepends a one-line status banner (`⚠️ [Context Health: ...]`) without polluting `transcript.jsonl`.
-
 ---
 
 ## Performance Architecture
@@ -50,8 +45,8 @@ Monitors conversation context pollution caused by successive context compactions
 1. **Incremental Append-Only Transcript Indexing**:
    - `server.cjs` caches `mtimeMs`, `size`, and `parsedBytes` per conversation in memory and persists `index_cache.json`.
    - On subsequent polls, only newly appended bytes (`stat.size - parsedBytes`) are read from disk, and `"type":"GENERIC"` lines are skipped before `JSON.parse` (`< 1 ms` per status poll).
-2. **Zero-Process Git Reflog Tail Parser + `.git/HEAD` Mtime Guard**:
-   - Both the hook and server inspect `.git/HEAD` and `.git/logs/HEAD` `mtimeMs` first (`0.2 ms`, zero child processes spawned in the `PreInvocation` hook).
+2. **Git Reflog Tail Parser + `.git/HEAD` Mtime Guard**:
+   - `server.cjs` inspects `.git/HEAD` and `.git/logs/HEAD` `mtimeMs` with a 1.5s TTL before touching Git state.
 
 ---
 
@@ -91,8 +86,6 @@ Once installed, `Context Health` is automatically enabled and available in the r
 │       ├── sidecar.json              # Antigravity sidecar manifest (AUX_PANE + SIDEBAR)
 │       ├── server.cjs                # HTTP + incremental transcript & git indexing server
 │       └── ui.html                   # Auxiliary pane UI
-├── hooks/
-│   └── context-health-check.cjs      # Sub-20ms PreInvocation warning hook
 ├── setup.cjs                         # Cross-platform installer (Windows & Linux)
 ├── AGENTS.md                         # Instructions for AI coding agents
 └── README.md
