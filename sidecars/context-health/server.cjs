@@ -81,33 +81,19 @@ const FALLBACK_PRELOAD_JS = `(function() {
         }
         return data;
       },
-      async startConversation(message, title) {
+      async startConversation(message) {
         const res = await secureFetch('/_sidecar/new-conversation', {
           method: 'POST',
-          body: JSON.stringify({ message, title })
+          body: JSON.stringify({ message })
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || (data && data.error)) {
           throw new Error((data && data.error) || 'Failed to start conversation');
         }
         return data;
-      },
-      async getConversationMetadata(convId) {
-        const res = await secureFetch('/_sidecar/get-conversation-metadata', {
-          method: 'POST',
-          body: JSON.stringify({ conversationId: convId || conversationId })
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || (data && data.error)) {
-          throw new Error((data && data.error) || 'Failed to get conversation metadata');
-        }
-        return data;
       }
     },
     ui: {
-      toggleAuxPane(request) {
-        window.parent.postMessage({ type: 'toggle-aux-pane', payload: request }, '*');
-      },
       toggleConversation(convId) {
         window.parent.postMessage({ type: 'toggle-conversation', payload: { conversationId: convId } }, '*');
       }
@@ -167,24 +153,25 @@ function resolveDataDir(appDataDir) {
   }
 }
 
-function writeJsonAtomic(filePath, data, mode) {
+function writeJsonAtomic(filePath, data, mode, pretty = false) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const suffix = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
   const tmpPath = `${filePath}.tmp.${suffix}`;
-  const raw = JSON.stringify(data, null, 2);
+  const raw = pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data);
   try {
     fs.writeFileSync(tmpPath, raw, { encoding: 'utf-8', mode });
     fs.renameSync(tmpPath, filePath);
-  } finally {
+  } catch (err) {
     try {
       fs.rmSync(tmpPath, { force: true });
     } catch {}
+    throw err;
   }
 }
 
 function normalizeWorkspacePath(rawInput) {
   if (!rawInput || typeof rawInput !== 'string') return '';
-  let p = rawInput.trim();
+  let p = rawInput.trim().replace(/^["']+|["']+$/g, '').trim();
   if (!p) return '';
   if (p.startsWith('file://')) {
     try {
@@ -306,13 +293,18 @@ function extractCheckpointOverview(content) {
   if (!content || typeof content !== 'string') return '';
   const summaryMatch = /<summary>([\s\S]*?)<\/summary>/i.exec(content);
   const body = summaryMatch ? summaryMatch[1] : content;
-  const overviewMatch = /#+\s*Task Overview\s*\n+([\s\S]*?)(?=\n#+\s|\n<\/summary>|$)/i.exec(body);
-  const rawSection = overviewMatch ? overviewMatch[1] : body;
+  const overviewMatch = /#+\s*(?:\d+\.\s*)?Task Overview\s*\n+([\s\S]*?)(?=\n---|\n#+\s|\n<\/summary>|$)/i.exec(body);
+  const rawSection = overviewMatch
+    ? overviewMatch[1]
+    : (summaryMatch
+      ? summaryMatch[1]
+      : body.replace(/^# Resuming from a compaction\s*\n+(?:You are continuing work[^\n]*\n+)?/i, ''));
   return rawSection
-    .replace(/<[^>]+>/g, '')
+    .replace(/<truncated\s+\d+\s+bytes>/gi, '[...]')
+    .replace(/<\/?[A-Za-z_][A-Za-z0-9_-]*>/g, '')
     .replace(/\r\n/g, '\n')
     .trim()
-    .slice(0, 1200);
+    .slice(0, 4000);
 }
 
 function extractPathsFromToolCalls(toolCalls) {
@@ -346,7 +338,7 @@ function createEmptyEntry(convId) {
     parsedBytes: 0,
     lastActiveIso: '',
     lastActiveMs: 0,
-    lastUserInputMs: 0,
+    lastViewMs: 0,
     isSubagent: false,
     parentConvId: '',
     spawnedSubagentIds: [],
@@ -368,8 +360,12 @@ function createEmptyEntry(convId) {
     lastPrompt: '',
     latestHandoffPrompt: '',
     latestHandoffMs: 0,
+    handoffPendingMs: 0,
+    handoffTargetStepIndex: -1,
     awaitingHandoffResponse: false,
     needsFullHandoffRead: false,
+    checkpointTargetStepIndex: -1,
+    needsFullCheckpointRead: false,
     checkpointOverview: '',
     prompts: [],
     mentionedCommits: []
@@ -401,11 +397,14 @@ function processTranscriptLine(entry, line, isFirstLine) {
   const hasPlanner = line.includes('"type":"PLANNER_RESPONSE"');
   const hasCheckpoint = line.includes('"type":"CHECKPOINT"');
   const hasSystem = line.includes('"type":"SYSTEM_MESSAGE"');
-  const hasGeneric = line.includes('"type":"GENERIC"');
-  const hasSubagentCreation = line.includes('Created the following subagent');
+  const hasGeneric =
+    !hasUser && !hasPlanner && !hasCheckpoint && !hasSystem && line.includes('"type":"GENERIC"');
+  const hasSubagentCreation = hasGeneric && line.includes('Created the following subagent');
 
-  if (hasGeneric && !hasSubagentCreation && entry.workspacePath) {
-    extractMentionedCommits(entry, line);
+  if (hasGeneric && !hasSubagentCreation) {
+    if (line.includes('[')) {
+      extractMentionedCommits(entry, line);
+    }
     return false;
   }
 
@@ -443,9 +442,6 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.lastActiveIso = createdAt;
       entry.lastActiveMs = createdMs;
     }
-    if (createdAt && createdMs >= (entry.lastUserInputMs || 0)) {
-      entry.lastUserInputMs = createdMs;
-    }
     const clean = cleanUserPrompt(content);
     if (clean) {
       if (clean.startsWith('[Context Health Smart Handoff]')) {
@@ -453,6 +449,8 @@ function processTranscriptLine(entry, line, isFirstLine) {
         return false;
       }
       entry.awaitingHandoffResponse = false;
+      entry.needsFullHandoffRead = false;
+      entry.handoffTargetStepIndex = -1;
       entry.promptCount += 1;
       entry.promptsSinceLastCompact += 1;
       if (!entry.firstPrompt) entry.firstPrompt = clean.slice(0, 500);
@@ -499,13 +497,16 @@ function processTranscriptLine(entry, line, isFirstLine) {
         entry.latestHandoffPrompt = handoffMatch[1].trim();
         entry.latestHandoffMs = createdMs || Date.now();
         entry.awaitingHandoffResponse = false;
+        entry.needsFullHandoffRead = false;
+        entry.handoffTargetStepIndex = -1;
       } else if (
         isTruncatedContent &&
         (/<HANDOFF_PROMPT>/i.test(trimmedContent) ||
           (entry.awaitingHandoffResponse && (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)))
       ) {
         entry.needsFullHandoffRead = true;
-        entry.latestHandoffMs = createdMs || Date.now();
+        entry.handoffTargetStepIndex = typeof obj.step_index === 'number' ? obj.step_index : -1;
+        entry.handoffPendingMs = createdMs || Date.now();
         entry.awaitingHandoffResponse = false;
       } else if (
         entry.awaitingHandoffResponse &&
@@ -514,6 +515,8 @@ function processTranscriptLine(entry, line, isFirstLine) {
         entry.latestHandoffPrompt = trimmedContent;
         entry.latestHandoffMs = createdMs || Date.now();
         entry.awaitingHandoffResponse = false;
+        entry.needsFullHandoffRead = false;
+        entry.handoffTargetStepIndex = -1;
       }
     }
 
@@ -549,6 +552,16 @@ function processTranscriptLine(entry, line, isFirstLine) {
       if (entry.compactTriggerTokens.length > 25) {
         entry.compactTriggerTokens.shift();
       }
+    }
+    const isTruncatedContent =
+      (Array.isArray(obj.truncated_fields) && obj.truncated_fields.includes('content')) ||
+      content.includes('\n<truncated ');
+    if (isTruncatedContent) {
+      entry.needsFullCheckpointRead = true;
+      entry.checkpointTargetStepIndex = typeof obj.step_index === 'number' ? obj.step_index : -1;
+    } else {
+      entry.needsFullCheckpointRead = false;
+      entry.checkpointTargetStepIndex = -1;
     }
     const overview = extractCheckpointOverview(content);
     if (overview) {
@@ -628,6 +641,21 @@ function extractTitleFromPbtxt(raw) {
   return decodePbtxtString(match[1]);
 }
 
+function extractAnnotationFromPbtxt(raw) {
+  if (!raw || typeof raw !== 'string') return { title: '', lastViewMs: 0 };
+  const title = extractTitleFromPbtxt(raw);
+  const viewMatch = /\blast_user_view_time\s*:\s*\{\s*seconds\s*:\s*(\d+)(?:\s+nanos\s*:\s*(\d+))?\s*\}/.exec(raw);
+  let lastViewMs = 0;
+  if (viewMatch) {
+    const sec = parseInt(viewMatch[1], 10) || 0;
+    const nanos = viewMatch[2] ? (parseInt(viewMatch[2], 10) || 0) : 0;
+    if (sec > 0) {
+      lastViewMs = sec * 1000 + Math.floor(nanos / 1e6);
+    }
+  }
+  return { title, lastViewMs };
+}
+
 function rebuildSearchCorpus(entry) {
   const parts = [];
   if (entry.title) parts.push(entry.title);
@@ -643,6 +671,138 @@ function rebuildSearchCorpus(entry) {
     enumerable: false,
     configurable: true
   });
+}
+
+const REFLOG_ACTION_RE = /^(?:commit(?:\s*\([^)]+\))?:|merge\b|pull\b|cherry-pick\b|rebase(?:\s*\((?!start\b|finish\b|abort\b)[^)]+\))?:)/i;
+const CHECKPOINT_TOKEN = Buffer.from('"type":"CHECKPOINT"');
+
+function resolveFullCheckpointOverview(entry, transcriptPath) {
+  if (!entry.needsFullCheckpointRead) return false;
+  entry.needsFullCheckpointRead = false;
+  const targetStep = typeof entry.checkpointTargetStepIndex === 'number' ? entry.checkpointTargetStepIndex : -1;
+  entry.checkpointTargetStepIndex = -1;
+
+  const fullPath = path.join(path.dirname(transcriptPath), 'transcript_full.jsonl');
+  if (!isFile(fullPath)) return false;
+
+  let fullFd;
+  try {
+    const fStat = fs.statSync(fullPath);
+    if (fStat.size <= 0) return false;
+    fullFd = fs.openSync(fullPath, 'r');
+
+    const windowSize = 2 * 1024 * 1024;
+    const overlap = 256 * 1024;
+    let endPos = fStat.size;
+
+    while (endPos > 0) {
+      const startPos = Math.max(0, endPos - windowSize);
+      const readLen = endPos - startPos;
+      const buf = Buffer.allocUnsafe(readLen);
+      const bytesRead = fs.readSync(fullFd, buf, 0, readLen, startPos);
+      const slice = buf.subarray(0, bytesRead);
+
+      let searchFrom = slice.length;
+      while (searchFrom > 0) {
+        const idx = slice.lastIndexOf(CHECKPOINT_TOKEN, searchFrom - 1);
+        if (idx < 0) break;
+        const lineStartNl = slice.lastIndexOf(0x0a, idx);
+        if (lineStartNl < 0 && startPos > 0) {
+          break;
+        }
+        const lineStart = lineStartNl < 0 ? 0 : lineStartNl + 1;
+        const lineEndNl = slice.indexOf(0x0a, idx);
+        const lineEnd = lineEndNl < 0 ? slice.length : lineEndNl;
+        const lineStr = slice.subarray(lineStart, lineEnd).toString('utf-8').trim();
+        searchFrom = lineStart;
+
+        if (!lineStr) continue;
+        try {
+          const fObj = JSON.parse(lineStr);
+          if (fObj.type !== 'CHECKPOINT') continue;
+          if (targetStep >= 0 && typeof fObj.step_index === 'number' && fObj.step_index !== targetStep) {
+            continue;
+          }
+          const overview = extractCheckpointOverview(fObj.content);
+          if (overview) {
+            entry.checkpointOverview = overview;
+            return true;
+          }
+          return false;
+        } catch {}
+      }
+
+      if (startPos === 0) break;
+      endPos = Math.min(endPos - 1, startPos + overlap);
+    }
+  } catch {} finally {
+    if (fullFd !== undefined) {
+      try { fs.closeSync(fullFd); } catch {}
+    }
+  }
+  return false;
+}
+
+function resolveFullHandoffPrompt(entry, transcriptPath) {
+  if (!entry.needsFullHandoffRead) return false;
+  const fullPath = path.join(path.dirname(transcriptPath), 'transcript_full.jsonl');
+  if (!isFile(fullPath)) {
+    entry.needsFullHandoffRead = false;
+    entry.handoffTargetStepIndex = -1;
+    return false;
+  }
+
+  let fullFd;
+  let found = false;
+  try {
+    const fStat = fs.statSync(fullPath);
+    const rSize = Math.min(fStat.size, 256 * 1024);
+    fullFd = fs.openSync(fullPath, 'r');
+    const fBuf = Buffer.allocUnsafe(rSize);
+    const fRead = fs.readSync(fullFd, fBuf, 0, rSize, Math.max(0, fStat.size - rSize));
+    const fLines = fBuf.subarray(0, fRead).toString('utf-8').split('\n');
+    const targetStep = typeof entry.handoffTargetStepIndex === 'number' ? entry.handoffTargetStepIndex : -1;
+
+    for (let i = fLines.length - 1; i >= 0; i--) {
+      const fl = fLines[i].trim();
+      if (!fl || !fl.includes('"type":"PLANNER_RESPONSE"')) continue;
+      try {
+        const fObj = JSON.parse(fl);
+        if (fObj.type !== 'PLANNER_RESPONSE') continue;
+        if (targetStep >= 0 && typeof fObj.step_index === 'number' && fObj.step_index !== targetStep) {
+          continue;
+        }
+        if (typeof fObj.content === 'string' && fObj.content.trim()) {
+          const m = /<HANDOFF_PROMPT>\s*([\s\S]*?)\s*<\/HANDOFF_PROMPT>/i.exec(fObj.content);
+          if (m && m[1].trim()) {
+            entry.latestHandoffPrompt = m[1].trim();
+            found = true;
+          } else if (!Array.isArray(fObj.tool_calls) || fObj.tool_calls.length === 0) {
+            entry.latestHandoffPrompt = fObj.content.trim();
+            found = true;
+          }
+        }
+        if (found || targetStep >= 0) break;
+      } catch {}
+    }
+  } catch {} finally {
+    if (fullFd !== undefined) {
+      try { fs.closeSync(fullFd); } catch {}
+    }
+  }
+
+  if (found) {
+    entry.latestHandoffMs = entry.handoffPendingMs || Date.now();
+    entry.needsFullHandoffRead = false;
+    entry.handoffTargetStepIndex = -1;
+    return true;
+  }
+
+  if (Date.now() - (entry.handoffPendingMs || 0) > 15000) {
+    entry.needsFullHandoffRead = false;
+    entry.handoffTargetStepIndex = -1;
+  }
+  return false;
 }
 
 function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
@@ -661,6 +821,10 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
     existingEntry.mtimeMs === stat.mtimeMs &&
     existingEntry.parsedBytes === stat.size
   ) {
+    if (existingEntry.needsFullHandoffRead) {
+      const resolved = resolveFullHandoffPrompt(existingEntry, transcriptPath);
+      return { entry: existingEntry, changed: resolved };
+    }
     return { entry: existingEntry, changed: false };
   }
 
@@ -696,6 +860,20 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
   }
 
   const lastNewlineIdx = buf.lastIndexOf(0x0a);
+  if (lastNewlineIdx < 0) {
+    const trimmedBuf = buf.toString('utf-8').trim();
+    if (!trimmedBuf) {
+      entry.mtimeMs = stat.mtimeMs;
+      entry.size = stat.size;
+      return { entry, changed: false };
+    }
+    try {
+      JSON.parse(trimmedBuf);
+    } catch {
+      return existingEntry ? { entry: existingEntry, changed: false } : null;
+    }
+  }
+
   const completeBuf = lastNewlineIdx >= 0 ? buf.subarray(0, lastNewlineIdx + 1) : buf;
   const text = completeBuf.toString('utf-8');
   const lines = text.split('\n');
@@ -711,41 +889,14 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
     isFirstLine = false;
   }
 
-  if (entry.needsFullHandoffRead) {
-    entry.needsFullHandoffRead = false;
-    const fullPath = path.join(path.dirname(transcriptPath), 'transcript_full.jsonl');
-    if (isFile(fullPath)) {
-      let fullFd;
-      try {
-        const fStat = fs.statSync(fullPath);
-        const rSize = Math.min(fStat.size, 256 * 1024);
-        fullFd = fs.openSync(fullPath, 'r');
-        const fBuf = Buffer.allocUnsafe(rSize);
-        const fRead = fs.readSync(fullFd, fBuf, 0, rSize, Math.max(0, fStat.size - rSize));
-        const fLines = fBuf.subarray(0, fRead).toString('utf-8').split('\n');
-        for (let i = fLines.length - 1; i >= 0; i--) {
-          const fl = fLines[i].trim();
-          if (!fl || !fl.includes('"type":"PLANNER_RESPONSE"')) continue;
-          try {
-            const fObj = JSON.parse(fl);
-            if (fObj.type === 'PLANNER_RESPONSE' && typeof fObj.content === 'string' && fObj.content.trim()) {
-              const m = /<HANDOFF_PROMPT>\s*([\s\S]*?)\s*<\/HANDOFF_PROMPT>/i.exec(fObj.content);
-              if (m && m[1].trim()) {
-                entry.latestHandoffPrompt = m[1].trim();
-                break;
-              } else if (!Array.isArray(fObj.tool_calls) || fObj.tool_calls.length === 0) {
-                entry.latestHandoffPrompt = fObj.content.trim();
-                break;
-              }
-            }
-          } catch {}
-        }
-      } catch {} finally {
-        if (fullFd !== undefined) {
-          try { fs.closeSync(fullFd); } catch {}
-        }
-      }
+  if (entry.needsFullCheckpointRead) {
+    if (resolveFullCheckpointOverview(entry, transcriptPath)) {
+      corpusDirty = true;
     }
+  }
+
+  if (entry.needsFullHandoffRead) {
+    resolveFullHandoffPrompt(entry, transcriptPath);
   }
 
   entry.parsedBytes = lastNewlineIdx >= 0 ? startOffset + lastNewlineIdx + 1 : stat.size;
@@ -784,7 +935,7 @@ function parseGitReflogTail(repoPath, maxEntries = 200) {
       if (tabIdx < 0) continue;
       const meta = line.slice(0, tabIdx).trim();
       const action = line.slice(tabIdx + 1).trim();
-      if (!/^(?:commit(?:\s*\([^)]+\))?:|merge\b|pull\b|cherry-pick\b|rebase\b)/i.test(action)) {
+      if (!REFLOG_ACTION_RE.test(action)) {
         continue;
       }
       const metaMatch = /^([0-9a-f]{40})\s+([0-9a-f]{40})\s+.*\s+(\d{9,12})\s+([+-]\d{4})$/i.exec(meta);
@@ -816,6 +967,7 @@ function parseGitReflogTail(repoPath, maxEntries = 200) {
 class GitRepoCache {
   constructor() {
     this.repos = new Map();
+    this.revision = 1;
   }
 
   getHeadMtime(repoPath) {
@@ -830,26 +982,71 @@ class GitRepoCache {
     return `${m1}:${m2}`;
   }
 
-  getRepoCommits(repoPath) {
-    if (!repoPath) return [];
-    const signature = this.getHeadMtime(repoPath);
-    if (signature === '0:0') return [];
+  invalidateMtimeChecks() {
+    for (const record of this.repos.values()) {
+      record.checkedAtMs = 0;
+    }
+  }
 
+  checkKnownRepos(force = false) {
+    for (const repoPath of this.repos.keys()) {
+      this.getRepoRecord(repoPath, force);
+    }
+  }
+
+  getRepoRecord(repoPath, force = false) {
+    if (!repoPath) return null;
+    const now = Date.now();
     const existing = this.repos.get(repoPath);
+    if (!force && existing && now - existing.checkedAtMs < 1500) {
+      return existing;
+    }
+
+    const signature = this.getHeadMtime(repoPath);
+    if (signature === '0:0') {
+      const hasGit = existing && existing.signature === '0:0'
+        ? existing.hasGit
+        : isDirectory(path.join(repoPath, '.git'));
+      if (!existing || existing.signature !== '0:0' || existing.hasGit !== hasGit) {
+        this.revision += 1;
+      }
+      const emptyRecord = {
+        signature: '0:0',
+        hasGit,
+        commits: [],
+        refreshing: false,
+        checkedAtMs: now
+      };
+      this.repos.set(repoPath, emptyRecord);
+      return emptyRecord;
+    }
+
     if (existing && existing.signature === signature) {
-      return existing.commits;
+      existing.checkedAtMs = now;
+      if (force && !existing.refreshing) {
+        this.refreshViaGitAsync(repoPath, signature);
+      }
+      return existing;
     }
 
     const reflogCommits = parseGitReflogTail(repoPath, 200);
     const record = {
       signature,
-      commits: reflogCommits,
-      refreshing: false
+      hasGit: true,
+      commits: reflogCommits.length > 0 || !existing ? reflogCommits : existing.commits,
+      refreshing: existing ? existing.refreshing : false,
+      checkedAtMs: now
     };
     this.repos.set(repoPath, record);
+    this.revision += 1;
 
     this.refreshViaGitAsync(repoPath, signature);
-    return record.commits;
+    return record;
+  }
+
+  getRepoCommits(repoPath, force = false) {
+    const rec = this.getRepoRecord(repoPath, force);
+    return rec ? rec.commits : [];
   }
 
   refreshViaGitAsync(repoPath, signature) {
@@ -885,9 +1082,12 @@ class GitRepoCache {
         if (commits.length > 0) {
           this.repos.set(repoPath, {
             signature,
+            hasGit: true,
             commits,
-            refreshing: false
+            refreshing: false,
+            checkedAtMs: Date.now()
           });
+          this.revision += 1;
         }
       }
     );
@@ -901,16 +1101,25 @@ class GitRepoCache {
         missedCommits: []
       };
     }
-    const commits = this.getRepoCommits(entry.workspacePath);
-    if (!commits || commits.length === 0) {
+    const record = this.getRepoRecord(entry.workspacePath);
+    if (!record || record.commits.length === 0) {
       return {
-        hasGit: isDirectory(path.join(entry.workspacePath, '.git')),
+        hasGit: Boolean(record && record.hasGit),
         commitsBehind: 0,
         missedCommits: []
       };
     }
 
+    const commits = record.commits;
     const graceCutoffMs = entry.lastActiveMs + 45000;
+    if (commits[0].tsMs <= graceCutoffMs) {
+      return {
+        hasGit: true,
+        commitsBehind: 0,
+        missedCommits: []
+      };
+    }
+
     const mentioned = new Set(entry.mentionedCommits || []);
     const missed = [];
 
@@ -943,9 +1152,10 @@ function resolveAgentApiCommand(appDataDir) {
     if (isFile(langServer)) {
       return { file: langServer, prefix: ['agentapi'], shell: false };
     }
+    const geminiRoot = path.join(os.homedir(), '.gemini');
     const candidateDirs = [
       appDataDir,
-      path.join(os.homedir(), '.gemini', 'antigravity')
+      ...APP_CANDIDATES.map((app) => path.join(geminiRoot, app))
     ].filter(Boolean);
     for (const d of candidateDirs) {
       const bat = path.join(d, 'bin', 'agentapi.bat');
@@ -1078,8 +1288,15 @@ class ContextHealthServer {
     this.annotationsDir = path.join(this.appDataDir, 'annotations');
     this.gitCache = new GitRepoCache();
     this.stateVersion = 1;
+    this.transcriptRev = 1;
     this.lastStateSignature = '';
     this.lastRefreshDurationMs = 0;
+    this.lastFullScanMs = 0;
+    this.lastBrainDirMtimeMs = 0;
+    this.cachedIndexSummary = null;
+    this.cachedCardsState = null;
+    this.cachedUiMtimeMs = 0;
+    this.lastUiStatCheckMs = 0;
     this.saveCacheTimer = null;
     this.indexCacheDirty = false;
     this.server = null;
@@ -1114,7 +1331,7 @@ class ContextHealthServer {
     if (isFile(this.indexCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.indexCachePath, 'utf-8'));
-        if (raw && raw.version === 7 && Array.isArray(raw.entries)) {
+        if (raw && raw.version === 10 && Array.isArray(raw.entries)) {
           for (const item of raw.entries) {
             if (item && typeof item.id === 'string') {
               rebuildSearchCorpus(item);
@@ -1134,7 +1351,7 @@ class ContextHealthServer {
     this.indexCacheDirty = false;
     try {
       const entries = [...this.convCache.values()];
-      writeJsonAtomic(this.indexCachePath, { version: 7, savedAt: Date.now(), entries });
+      writeJsonAtomic(this.indexCachePath, { version: 10, savedAt: Date.now(), entries });
     } catch {}
   }
 
@@ -1146,7 +1363,7 @@ class ContextHealthServer {
       if (this.indexCacheDirty) {
         this.saveIndexCache();
       }
-    }, 1000);
+    }, 8000);
     if (typeof this.saveCacheTimer.unref === 'function') {
       this.saveCacheTimer.unref();
     }
@@ -1169,7 +1386,13 @@ class ContextHealthServer {
     return FALLBACK_PRELOAD_JS;
   }
 
-  resolveConversationTitle(convId) {
+  resolveConversationAnnotation(convId, forceStat = false) {
+    const now = Date.now();
+    const cached = this.annotationTitleCache.get(convId);
+    if (!forceStat && cached && now - cached.checkedAtMs < 5000) {
+      return cached;
+    }
+
     const pbtxtPath = path.join(this.annotationsDir, `${convId}.pbtxt`);
     let stat;
     try {
@@ -1178,20 +1401,55 @@ class ContextHealthServer {
       stat = null;
     }
     if (!stat || !stat.isFile()) {
-      return '';
+      const emptyItem = { mtimeMs: 0, title: '', lastViewMs: 0, checkedAtMs: now };
+      this.annotationTitleCache.set(convId, emptyItem);
+      return emptyItem;
     }
-    const cached = this.annotationTitleCache.get(convId);
-    if (cached && cached.mtimeMs === stat.mtimeMs) {
-      return cached.title;
+    if (cached && cached.mtimeMs === stat.mtimeMs && typeof cached.lastViewMs === 'number') {
+      cached.checkedAtMs = now;
+      return cached;
     }
     try {
       const raw = fs.readFileSync(pbtxtPath, 'utf-8');
-      const title = extractTitleFromPbtxt(raw);
-      this.annotationTitleCache.set(convId, { mtimeMs: stat.mtimeMs, title });
-      return title;
+      const { title, lastViewMs } = extractAnnotationFromPbtxt(raw);
+      const item = { mtimeMs: stat.mtimeMs, title, lastViewMs, checkedAtMs: now };
+      this.annotationTitleCache.set(convId, item);
+      return item;
     } catch {
-      return cached ? cached.title : '';
+      return cached || { mtimeMs: 0, title: '', lastViewMs: 0, checkedAtMs: now };
     }
+  }
+
+  applyEntryMetadata(entry, convId, activeConvId = '', activeWorkspaceNorm = '', forceAnnot = false) {
+    let changed = false;
+    const annot = this.resolveConversationAnnotation(convId, forceAnnot);
+    if (annot.title && entry.title !== annot.title) {
+      entry.title = annot.title;
+      rebuildSearchCorpus(entry);
+      changed = true;
+    }
+    if (annot.lastViewMs && entry.lastViewMs !== annot.lastViewMs) {
+      entry.lastViewMs = annot.lastViewMs;
+      changed = true;
+    }
+    if (!entry.workspacePath && this.metadataWorkspaceCache.has(convId)) {
+      entry.workspacePath = this.metadataWorkspaceCache.get(convId);
+      changed = true;
+    }
+    if (
+      convId === activeConvId &&
+      activeWorkspaceNorm &&
+      !entry.workspacePath &&
+      entry.promptCount <= 1 &&
+      entry.lastActiveMs > 0 &&
+      Date.now() - entry.lastActiveMs < 10 * 60 * 1000
+    ) {
+      entry.workspacePath = activeWorkspaceNorm;
+      this.metadataWorkspaceCache.set(convId, activeWorkspaceNorm);
+      this.saveMetadataCache();
+      changed = true;
+    }
+    return changed;
   }
 
   refreshSingleEntry(convId) {
@@ -1209,15 +1467,40 @@ class ContextHealthServer {
     const existing = this.convCache.get(convId);
     const res = updateTranscriptEntry(convId, transcriptPath, existing, stat);
     if (!res) return existing || null;
-    if (res.changed) {
+    const metaChanged = this.applyEntryMetadata(res.entry, convId, '', '', true);
+    if (res.changed || metaChanged) {
       this.convCache.set(convId, res.entry);
+      this.transcriptRev += 1;
+      this.cachedIndexSummary = null;
+      this.cachedCardsState = null;
       this.scheduleSaveIndexCache();
     }
     return res.entry;
   }
 
+  refreshEntryById(convId, activeConvId, activeWorkspaceNorm, forceAnnot) {
+    const transcriptPath = path.join(this.brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
+    let stat;
+    try {
+      stat = fs.statSync(transcriptPath, { throwIfNoEntry: false });
+    } catch {
+      stat = null;
+    }
+    if (!stat || !stat.isFile()) return false;
+
+    const existing = this.convCache.get(convId);
+    const res = updateTranscriptEntry(convId, transcriptPath, existing, stat);
+    if (!res) return false;
+
+    const entry = res.entry;
+    const metaChanged = this.applyEntryMetadata(entry, convId, activeConvId, activeWorkspaceNorm, forceAnnot);
+    this.convCache.set(convId, entry);
+    return res.changed || metaChanged;
+  }
+
   refreshIndex(options = {}) {
     const startNs = process.hrtime.bigint();
+    const force = Boolean(options.force);
     const activeConvId = (options.activeConvId || '').trim().toLowerCase();
     const activeWorkspaceUris = Array.isArray(options.workspaceUris) ? options.workspaceUris : [];
     const activeWorkspaceNorm = activeWorkspaceUris.length > 0
@@ -1225,63 +1508,83 @@ class ContextHealthServer {
       : '';
 
     let anyTranscriptChanged = false;
+    const now = Date.now();
 
-    if (isDirectory(this.brainDir)) {
-      let dirents = [];
-      try {
-        dirents = fs.readdirSync(this.brainDir, { withFileTypes: true });
-      } catch {}
+    let brainStat = null;
+    try {
+      brainStat = fs.statSync(this.brainDir, { throwIfNoEntry: false });
+    } catch {}
 
-      const seenIds = new Set();
-      for (const d of dirents) {
-        if (!d.isDirectory() || d.name.startsWith('.')) continue;
-        const convId = d.name.toLowerCase();
-        if (!UUID_RE.test(convId)) continue;
-        seenIds.add(convId);
+    if (brainStat && brainStat.isDirectory()) {
+      const brainMtimeMs = brainStat.mtimeMs || 0;
+      const doFullScan =
+        force ||
+        this.convCache.size === 0 ||
+        now - this.lastFullScanMs >= 15000 ||
+        (brainMtimeMs > 0 && brainMtimeMs !== this.lastBrainDirMtimeMs);
 
-        const transcriptPath = path.join(this.brainDir, d.name, '.system_generated', 'logs', 'transcript.jsonl');
-        let stat;
+      if (doFullScan) {
+        this.lastFullScanMs = now;
+        this.lastBrainDirMtimeMs = brainMtimeMs;
+
+        let dirents = [];
         try {
-          stat = fs.statSync(transcriptPath, { throwIfNoEntry: false });
-        } catch {
-          stat = null;
-        }
-        if (!stat || !stat.isFile()) continue;
+          dirents = fs.readdirSync(this.brainDir, { withFileTypes: true });
+        } catch {}
 
-        const existing = this.convCache.get(convId);
-        const res = updateTranscriptEntry(convId, transcriptPath, existing, stat);
-        if (!res) continue;
-
-        if (res.changed) anyTranscriptChanged = true;
-        const entry = res.entry;
-
-        const resolvedTitle = this.resolveConversationTitle(convId);
-        if (resolvedTitle && entry.title !== resolvedTitle) {
-          entry.title = resolvedTitle;
-          rebuildSearchCorpus(entry);
-          anyTranscriptChanged = true;
+        const seenIds = new Set();
+        for (const d of dirents) {
+          if (!d.isDirectory() || d.name.startsWith('.')) continue;
+          const convId = d.name.toLowerCase();
+          if (!UUID_RE.test(convId)) continue;
+          seenIds.add(convId);
+          if (this.refreshEntryById(convId, activeConvId, activeWorkspaceNorm, force || convId === activeConvId)) {
+            anyTranscriptChanged = true;
+          }
         }
 
-        if (!entry.workspacePath && this.metadataWorkspaceCache.has(convId)) {
-          entry.workspacePath = this.metadataWorkspaceCache.get(convId);
-          anyTranscriptChanged = true;
+        for (const cachedId of this.convCache.keys()) {
+          if (!seenIds.has(cachedId)) {
+            this.convCache.delete(cachedId);
+            anyTranscriptChanged = true;
+          }
         }
-        if (convId === activeConvId && activeWorkspaceNorm && !entry.workspacePath) {
-          entry.workspacePath = activeWorkspaceNorm;
-          this.metadataWorkspaceCache.set(convId, activeWorkspaceNorm);
-          this.saveMetadataCache();
-          anyTranscriptChanged = true;
+      } else {
+        const hotIds = new Set();
+        if (activeConvId && UUID_RE.test(activeConvId)) {
+          hotIds.add(activeConvId);
+        }
+        const candidates = this.cachedIndexSummary
+          ? this.cachedIndexSummary.sortedEntries
+          : [...this.convCache.values()];
+        let mainChecked = 0;
+        for (const entry of candidates) {
+          const isHot =
+            mainChecked < 8 ||
+            now - (entry.lastActiveMs || 0) < 15 * 60 * 1000 ||
+            entry.awaitingHandoffResponse ||
+            entry.needsFullHandoffRead;
+          if (isHot) {
+            hotIds.add(entry.id);
+            if (!entry.isSubagent) mainChecked += 1;
+            for (const subId of entry.spawnedSubagentIds || []) {
+              hotIds.add(subId);
+            }
+          }
         }
 
-        this.convCache.set(convId, entry);
+        for (const convId of hotIds) {
+          if (this.refreshEntryById(convId, activeConvId, activeWorkspaceNorm, convId === activeConvId)) {
+            anyTranscriptChanged = true;
+          }
+        }
       }
+    }
 
-      for (const cachedId of this.convCache.keys()) {
-        if (!seenIds.has(cachedId)) {
-          this.convCache.delete(cachedId);
-          anyTranscriptChanged = true;
-        }
-      }
+    if (!anyTranscriptChanged && this.cachedIndexSummary) {
+      const endNs = process.hrtime.bigint();
+      this.lastRefreshDurationMs = Number(endNs - startNs) / 1e6;
+      return this.cachedIndexSummary;
     }
 
     const parentLookup = new Map();
@@ -1291,7 +1594,6 @@ class ContextHealthServer {
       }
     }
 
-    const subagentCounts = new Map();
     const subagentTokens = new Map();
     for (const entry of this.convCache.values()) {
       if (parentLookup.has(entry.id)) {
@@ -1303,7 +1605,6 @@ class ContextHealthServer {
         if (parentEntry && !parentEntry.spawnedSubagentIds.includes(entry.id)) {
           parentEntry.spawnedSubagentIds.push(entry.id);
         }
-        subagentCounts.set(entry.parentConvId, (subagentCounts.get(entry.parentConvId) || 0) + 1);
         if (entry.totalTokens > 0) {
           subagentTokens.set(entry.parentConvId, (subagentTokens.get(entry.parentConvId) || 0) + entry.totalTokens);
         }
@@ -1311,12 +1612,9 @@ class ContextHealthServer {
     }
 
     const allRecentCompactTokens = [];
-    const sortedEntries = [...this.convCache.values()].sort((a, b) => {
-      const aUser = a.lastUserInputMs || a.lastActiveMs || 0;
-      const bUser = b.lastUserInputMs || b.lastActiveMs || 0;
-      if (bUser !== aUser) return bUser - aUser;
-      return (b.lastActiveMs || 0) - (a.lastActiveMs || 0);
-    });
+    const sortedEntries = [...this.convCache.values()].sort(
+      (a, b) => (b.lastActiveMs || 0) - (a.lastActiveMs || 0)
+    );
     for (const entry of sortedEntries) {
       if (Array.isArray(entry.compactTriggerTokens) && entry.compactTriggerTokens.length > 0) {
         allRecentCompactTokens.push(...entry.compactTriggerTokens.slice(-5));
@@ -1326,21 +1624,25 @@ class ContextHealthServer {
     const globalObservedCeiling = computeMedian(allRecentCompactTokens);
 
     if (anyTranscriptChanged) {
+      this.transcriptRev += 1;
+      this.cachedCardsState = null;
       this.scheduleSaveIndexCache();
     }
+
+    const summary = {
+      sortedEntries,
+      subagentTokens,
+      globalObservedCeiling
+    };
+    this.cachedIndexSummary = summary;
 
     const endNs = process.hrtime.bigint();
     this.lastRefreshDurationMs = Number(endNs - startNs) / 1e6;
 
-    return {
-      sortedEntries,
-      subagentCounts,
-      subagentTokens,
-      globalObservedCeiling
-    };
+    return summary;
   }
 
-  buildConversationCard(entry, subagentCounts, globalObservedCeiling, subagentTokens) {
+  buildConversationCard(entry, globalObservedCeiling, subagentTokens) {
     const verbatimPrompts = entry.compactCount > 0
       ? Math.min(10, entry.promptCount)
       : entry.promptCount;
@@ -1357,23 +1659,17 @@ class ContextHealthServer {
       : null;
 
     const drift = this.gitCache.computeDriftForConversation(entry);
-    const subagentCount = Math.max(
-      subagentCounts.get(entry.id) || 0,
-      (entry.spawnedSubagentIds || []).length
-    );
 
     return {
       id: entry.id,
       isSubagent: !!entry.isSubagent,
-      parentConvId: entry.parentConvId || null,
-      subagentCount,
       subagentTokens: subagentTokens ? (subagentTokens.get(entry.id) || 0) : 0,
       workspacePath: entry.workspacePath || '',
       workspaceKey: workspaceComparisonKey(entry.workspacePath || ''),
       workspaceName: getWorkspaceLabel(entry.workspacePath || ''),
       lastActiveIso: entry.lastActiveIso || '',
       lastActiveMs: entry.lastActiveMs || 0,
-      lastUserInputMs: entry.lastUserInputMs || entry.lastActiveMs || 0,
+      lastViewMs: entry.lastViewMs || 0,
       latestHandoffMs: entry.latestHandoffMs || 0,
       latestHandoffPrompt: entry.latestHandoffPrompt || '',
       compactCount: entry.compactCount || 0,
@@ -1394,7 +1690,6 @@ class ContextHealthServer {
       title: entry.title || '',
       firstPrompt: entry.firstPrompt || '',
       lastPrompt: entry.lastPrompt || '',
-      checkpointOverview: entry.checkpointOverview || '',
       git: {
         hasGit: drift.hasGit,
         commitsBehind: drift.commitsBehind
@@ -1412,89 +1707,121 @@ class ContextHealthServer {
       }
     }
 
+    const isForce = query.force === '1';
+    if (isForce) {
+      this.gitCache.invalidateMtimeChecks();
+    }
+
     const hostConvId = (
       query.activeConvId ||
       process.env.ANTIGRAVITY_CONVERSATION_ID ||
       ''
     ).trim().toLowerCase();
 
-    const { sortedEntries, subagentCounts, subagentTokens, globalObservedCeiling } = this.refreshIndex({
+    const { sortedEntries, subagentTokens, globalObservedCeiling } = this.refreshIndex({
       activeConvId: hostConvId,
-      workspaceUris
+      workspaceUris,
+      force: isForce
     });
 
     const detectedActiveWorkspaceNorm = workspaceUris.length > 0
       ? resolveCanonicalWorkspace(workspaceUris[0])
       : (sortedEntries.find((e) => e.id === hostConvId)?.workspacePath || '');
 
-    if (query.force === '1') {
-      this.gitCache.repos.clear();
-    }
-
     const activeWorkspaceKey = workspaceComparisonKey(detectedActiveWorkspaceNorm);
+    const visibleEntries = sortedEntries.filter((e) => !e.isSubagent || e.id === hostConvId);
 
-    const cards = sortedEntries.map((entry) =>
-      this.buildConversationCard(entry, subagentCounts, globalObservedCeiling, subagentTokens)
-    );
+    this.gitCache.checkKnownRepos(isForce);
 
-    if (UUID_RE.test(hostConvId) && !cards.some((c) => c.id === hostConvId)) {
-      const placeholderEntry = createEmptyEntry(hostConvId);
-      placeholderEntry.workspacePath =
-        detectedActiveWorkspaceNorm || this.metadataWorkspaceCache.get(hostConvId) || '';
-      cards.unshift(this.buildConversationCard(placeholderEntry, subagentCounts, globalObservedCeiling, subagentTokens));
-    }
+    let cards;
+    let workspaces;
+    if (
+      !isForce &&
+      this.cachedCardsState &&
+      this.cachedCardsState.transcriptRev === this.transcriptRev &&
+      this.cachedCardsState.gitRev === this.gitCache.revision &&
+      this.cachedCardsState.hostConvId === hostConvId &&
+      this.cachedCardsState.activeWorkspaceKey === activeWorkspaceKey
+    ) {
+      cards = this.cachedCardsState.cards;
+      workspaces = this.cachedCardsState.workspaces;
+    } else {
+      cards = visibleEntries.map((entry) =>
+        this.buildConversationCard(entry, globalObservedCeiling, subagentTokens)
+      );
 
-    const workspaceMap = new Map();
-    for (const c of cards) {
-      if (c.isSubagent) continue;
-      const key = c.workspaceKey || '__unscoped__';
-      const existing = workspaceMap.get(key);
-      if (existing) {
-        existing.count += 1;
-      } else {
-        workspaceMap.set(key, {
-          key,
-          path: c.workspacePath || '',
-          name: c.workspaceName,
-          count: 1
-        });
+      if (UUID_RE.test(hostConvId) && !cards.some((c) => c.id === hostConvId)) {
+        const placeholderEntry = createEmptyEntry(hostConvId);
+        placeholderEntry.workspacePath =
+          detectedActiveWorkspaceNorm || this.metadataWorkspaceCache.get(hostConvId) || '';
+        cards.unshift(this.buildConversationCard(placeholderEntry, globalObservedCeiling, subagentTokens));
       }
+
+      const workspaceMap = new Map();
+      for (const c of cards) {
+        if (c.isSubagent) continue;
+        const key = c.workspaceKey || '__unscoped__';
+        const existing = workspaceMap.get(key);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          workspaceMap.set(key, {
+            key,
+            path: c.workspacePath || '',
+            name: c.workspaceName,
+            count: 1
+          });
+        }
+      }
+      workspaces = [...workspaceMap.values()];
+
+      const signature = JSON.stringify({
+        hostConvId,
+        activeWorkspaceKey,
+        globalObservedCeiling,
+        items: cards.map((c) => [
+          c.id,
+          c.title,
+          c.lastActiveMs,
+          c.lastViewMs,
+          c.latestHandoffMs,
+          c.compactCount,
+          c.pollution.id,
+          c.promptCount,
+          c.currentTokens,
+          c.totalTokens,
+          c.subagentTokens,
+          c.workspaceKey,
+          c.git.commitsBehind
+        ])
+      });
+
+      if (signature !== this.lastStateSignature) {
+        this.lastStateSignature = signature;
+        this.stateVersion += 1;
+      }
+
+      this.cachedCardsState = {
+        transcriptRev: this.transcriptRev,
+        gitRev: this.gitCache.revision,
+        hostConvId,
+        activeWorkspaceKey,
+        cards,
+        workspaces
+      };
     }
 
-    const signature = JSON.stringify({
-      hostConvId,
-      activeWorkspaceKey,
-      globalObservedCeiling,
-      items: cards.map((c) => [
-        c.id,
-        c.title,
-        c.lastActiveMs,
-        c.lastUserInputMs,
-        c.latestHandoffMs,
-        c.compactCount,
-        c.pollution.id,
-        c.promptCount,
-        c.currentTokens,
-        c.totalTokens,
-        c.subagentTokens,
-        c.workspaceKey,
-        c.git.commitsBehind,
-        c.subagentCount
-      ])
-    });
-
-    if (signature !== this.lastStateSignature) {
-      this.lastStateSignature = signature;
-      this.stateVersion += 1;
+    const now = Date.now();
+    if (isForce || now - this.lastUiStatCheckMs >= 2000) {
+      this.lastUiStatCheckMs = now;
+      try {
+        this.cachedUiMtimeMs = Math.floor(fs.statSync(this.uiHtmlPath, { throwIfNoEntry: false })?.mtimeMs || 0);
+      } catch {}
     }
-
-    let uiMtimeMs = 0;
-    try {
-      uiMtimeMs = Math.floor(fs.statSync(this.uiHtmlPath, { throwIfNoEntry: false })?.mtimeMs || 0);
-    } catch {}
+    const uiMtimeMs = this.cachedUiMtimeMs;
 
     const clientVersion = parseInt(query.sinceVersion || '0', 10);
-    if (clientVersion > 0 && clientVersion === this.stateVersion && query.force !== '1') {
+    if (clientVersion > 0 && clientVersion === this.stateVersion && !isForce) {
       return {
         unchanged: true,
         version: this.stateVersion,
@@ -1507,7 +1834,7 @@ class ContextHealthServer {
     const rawSearch = (query.q || '').trim().toLowerCase();
     if (rawSearch) {
       searchMatches = {};
-      for (const entry of sortedEntries) {
+      for (const entry of visibleEntries) {
         if (!entry.searchCorpusLower || !entry.searchCorpusLower.includes(rawSearch)) continue;
         const matchingPrompts = [];
         for (const p of entry.prompts) {
@@ -1521,7 +1848,6 @@ class ContextHealthServer {
           }
         }
         searchMatches[entry.id] = {
-          matchedOverview: entry.checkpointOverview.toLowerCase().includes(rawSearch),
           matchingPrompts
         };
       }
@@ -1533,11 +1859,8 @@ class ContextHealthServer {
       uiMtimeMs,
       refreshMs: Number(this.lastRefreshDurationMs.toFixed(2)),
       hostConversationId: hostConvId || null,
-      activeWorkspacePath: detectedActiveWorkspaceNorm || '',
       activeWorkspaceKey: activeWorkspaceKey || '',
-      activeWorkspaceName: detectedActiveWorkspaceNorm ? getWorkspaceLabel(detectedActiveWorkspaceNorm) : '',
-      globalObservedCeiling,
-      workspaces: [...workspaceMap.values()],
+      workspaces,
       conversations: cards,
       searchMatches
     };
@@ -1557,13 +1880,6 @@ class ContextHealthServer {
       status: 200,
       body: {
         id: entry.id,
-        workspacePath: entry.workspacePath,
-        compactCount: entry.compactCount,
-        promptCount: entry.promptCount,
-        totalInputTokens: entry.totalInputTokens || 0,
-        totalCacheReadTokens: entry.totalCacheReadTokens || 0,
-        totalOutputTokens: entry.totalOutputTokens || 0,
-        totalTokens: entry.totalTokens || 0,
         checkpointOverview: entry.checkpointOverview,
         prompts: [...entry.prompts].reverse(),
         missedCommits: drift.missedCommits,
@@ -1722,12 +2038,7 @@ class ContextHealthServer {
         sendJson(res, 400, { error: 'Invalid conversationId or empty message' });
         return;
       }
-      const args = ['send-message'];
-      if (body.title && typeof body.title === 'string') {
-        args.push('--title', body.title);
-      }
-      args.push(convId, message);
-      const out = await execAgentApi(args, body.projectId, this.appDataDir);
+      const out = await execAgentApi(['send-message', convId, message], body.projectId, this.appDataDir);
       if (out && out.error) {
         sendJson(res, 502, out);
         return;
@@ -1752,29 +2063,6 @@ class ContextHealthServer {
       if (out && out.error) {
         sendJson(res, 502, out);
         return;
-      }
-      sendJson(res, 200, out);
-      return;
-    }
-
-    if (req.method === 'POST' && pathname === '/_sidecar/get-conversation-metadata') {
-      const body = await this.readJsonBody(req);
-      const convId = (body.conversationId || '').trim().toLowerCase();
-      if (!UUID_RE.test(convId)) {
-        sendJson(res, 400, { error: 'Invalid conversationId' });
-        return;
-      }
-      const out = await execAgentApi(['get-conversation-metadata', convId], body.projectId, this.appDataDir);
-      const uris =
-        out?.response?.conversationMetadata?.metadata?.workspaceUris ??
-        out?.conversationMetadata?.metadata?.workspaceUris ??
-        out?.metadata?.workspaceUris;
-      if (Array.isArray(uris) && uris.length > 0 && typeof uris[0] === 'string') {
-        const norm = resolveCanonicalWorkspace(uris[0]);
-        if (norm) {
-          this.metadataWorkspaceCache.set(convId, norm);
-          this.saveMetadataCache();
-        }
       }
       sendJson(res, 200, out);
       return;
@@ -1849,6 +2137,7 @@ if (require.main === module) {
 
 module.exports = {
   ContextHealthServer,
+  updateTranscriptEntry,
   classifyPollution,
   computeMedian,
   normalizeWorkspacePath,

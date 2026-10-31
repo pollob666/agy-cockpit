@@ -741,16 +741,15 @@
         manualPinTs: 0,
         detailsRevCounter: 0,
         scrollPositions: new Map(),
-        collapsedSections: new Set(),
         workspaceUris: [],
+        lastWorkspaceUrisJson: '[]',
+        pollInFlight: false,
         selectedWorkspaceKey: '__auto__',
         searchQuery: '',
         lastFetchedQuery: '',
         conversations: [],
         workspaces: [],
         activeWorkspaceKey: '',
-        activeWorkspaceName: '',
-        globalObservedCeiling: 0,
         searchMatches: null,
         expandedDetails: new Map(),
         expandedPromptKeys: new Set(),
@@ -860,19 +859,16 @@
         return '__all__';
       }
 
+      const TIER_UI = {
+        fresh: { id: 'fresh', label: 'Fresh', text: 'tier-fresh', dot: 'dot-fresh', color: '#10b981' },
+        warm: { id: 'warm', label: 'Warm', text: 'tier-warm', dot: 'dot-warm', color: '#eab308' },
+        heavy: { id: 'heavy', label: 'Heavy', text: 'tier-heavy', dot: 'dot-heavy', color: '#f97316' },
+        polluted: { id: 'polluted', label: 'Polluted', text: 'tier-polluted', dot: 'dot-polluted', color: '#ef4444' }
+      };
+
       function getCardTier(card) {
-        const compacts = Number(card && card.compactCount) || 0;
-        const compactedPrompts = Number(card && card.compactedPrompts) || 0;
-        if (compacts <= 2 && compactedPrompts === 0) {
-          return { id: 'fresh', label: 'Fresh', text: 'tier-fresh', dot: 'dot-fresh', color: '#10b981' };
-        }
-        if (compacts <= 5) {
-          return { id: 'warm', label: 'Warm', text: 'tier-warm', dot: 'dot-warm', color: '#eab308' };
-        }
-        if (compacts <= 9) {
-          return { id: 'heavy', label: 'Heavy', text: 'tier-heavy', dot: 'dot-heavy', color: '#f97316' };
-        }
-        return { id: 'polluted', label: 'Polluted', text: 'tier-polluted', dot: 'dot-polluted', color: '#ef4444' };
+        const id = (card && card.pollution && card.pollution.id) || 'fresh';
+        return TIER_UI[id] || TIER_UI.fresh;
       }
 
       document.addEventListener('scroll', (e) => {
@@ -983,81 +979,67 @@
         if (!isPending && state.openHandoffId !== card.id) return '';
 
         const hState = getHandoffState(card.id);
+        const idEsc = escapeHtml(card.id);
+        let subtitleHtml = '';
+        let placeholder = 'Optional instructions or focus for the AI handoff prompt (leave empty for full task handoff)...';
+        let rows = 8;
+        let readonlyAttr = '';
+        let buttonsHtml =
+          '<button class="btn-solid" data-action="handoff-smart-run" data-id="' + idEsc + '">' +
+            'Generate Handoff Prompt' +
+          '</button>' +
+          '<button class="ghost-btn" data-action="close-handoff" data-id="' + idEsc + '">' +
+            'Cancel' +
+          '</button>';
 
         if (isPending) {
-          return (
-            '<div class="drawer">' +
-              '<div class="drawer-subtitle" style="color:var(--foreground, #ededed);">' +
-                'Agent is generating AI handoff prompt...' +
-              '</div>' +
-              '<textarea ' +
-                'class="handoff-input" ' +
-                'data-focus-conv="' + escapeHtml(card.id) + '" ' +
-                'data-scroll-key="' + escapeHtml(card.id + ':handoff') + '" ' +
-                'placeholder="Waiting for AI handoff prompt..." ' +
-                'rows="8" ' +
-                'readonly>' +
-                escapeHtml(hState.text) +
-              '</textarea>' +
-              '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
-                '<button class="btn-solid" disabled>Generating...</button>' +
-                '<button class="ghost-btn" data-action="cancel-pending-handoff" data-id="' + escapeHtml(card.id) + '">' +
-                  'Cancel' +
-                '</button>' +
-              '</div>' +
-            '</div>'
-          );
-        }
-
-        if (hState.step === 'ready') {
-          return (
-            '<div class="drawer">' +
-              '<div class="drawer-subtitle" style="color:#34d399;">' +
-                'Review and edit AI handoff prompt before starting new chat' +
-              '</div>' +
-              '<textarea ' +
-                'class="handoff-input" ' +
-                'data-focus-conv="' + escapeHtml(card.id) + '" ' +
-                'data-scroll-key="' + escapeHtml(card.id + ':handoff') + '" ' +
-                'placeholder="Handoff prompt for the new conversation..." ' +
-                'rows="10">' +
-                escapeHtml(hState.text) +
-              '</textarea>' +
-              '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
-                '<button class="btn-solid" data-action="handoff-start-chat" data-id="' + escapeHtml(card.id) + '">' +
-                  'Start New Chat' +
-                '</button>' +
-                '<button class="btn-outline" data-action="handoff-copy" data-id="' + escapeHtml(card.id) + '">' +
-                  'Copy' +
-                '</button>' +
-                '<button class="ghost-btn" data-action="handoff-reset" data-id="' + escapeHtml(card.id) + '">' +
-                  'Regenerate' +
-                '</button>' +
-                '<button class="ghost-btn" data-action="close-handoff" data-id="' + escapeHtml(card.id) + '">' +
-                  'Close' +
-                '</button>' +
-              '</div>' +
-            '</div>'
-          );
+          subtitleHtml =
+            '<div class="drawer-subtitle" style="color:var(--foreground, #ededed);">' +
+              'Agent is generating AI handoff prompt...' +
+            '</div>';
+          placeholder = 'Waiting for AI handoff prompt...';
+          readonlyAttr = ' readonly';
+          buttonsHtml =
+            '<button class="btn-solid" disabled>Generating...</button>' +
+            '<button class="ghost-btn" data-action="cancel-pending-handoff" data-id="' + idEsc + '">' +
+              'Cancel' +
+            '</button>';
+        } else if (hState.step === 'ready') {
+          subtitleHtml =
+            '<div class="drawer-subtitle" style="color:#34d399;">' +
+              'Review and edit AI handoff prompt before starting new chat' +
+            '</div>';
+          placeholder = 'Handoff prompt for the new conversation...';
+          rows = 10;
+          buttonsHtml =
+            '<button class="btn-solid" data-action="handoff-start-chat" data-id="' + idEsc + '">' +
+              'Start New Chat' +
+            '</button>' +
+            '<button class="btn-outline" data-action="handoff-copy" data-id="' + idEsc + '">' +
+              'Copy' +
+            '</button>' +
+            '<button class="ghost-btn" data-action="handoff-reset" data-id="' + idEsc + '">' +
+              'Regenerate' +
+            '</button>' +
+            '<button class="ghost-btn" data-action="close-handoff" data-id="' + idEsc + '">' +
+              'Close' +
+            '</button>';
         }
 
         return (
           '<div class="drawer">' +
+            subtitleHtml +
             '<textarea ' +
               'class="handoff-input" ' +
-              'data-focus-conv="' + escapeHtml(card.id) + '" ' +
+              'data-focus-conv="' + idEsc + '" ' +
               'data-scroll-key="' + escapeHtml(card.id + ':handoff') + '" ' +
-              'placeholder="Optional instructions or focus for the AI handoff prompt (leave empty for full task handoff)..." ' +
-              'rows="8">' +
+              'placeholder="' + placeholder + '" ' +
+              'rows="' + rows + '"' +
+              readonlyAttr + '>' +
               escapeHtml(hState.text) +
             '</textarea>' +
             '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
-              '<button class="btn-solid" data-action="handoff-smart-run" data-id="' + escapeHtml(card.id) + '">' +
-                'Generate Handoff Prompt' +
-              '</button>' +
-              '<button class="ghost-btn" data-action="close-handoff" data-id="' + escapeHtml(card.id) + '">' +
-                'Cancel' +
-              '</button>' +
+              buttonsHtml +
             '</div>' +
           '</div>'
         );
@@ -1322,33 +1304,68 @@
         }
       }
 
+      function getCardFocusMs(card) {
+        if (!card) return 0;
+        return Math.max(Number(card.lastViewMs) || 0, Number(card.lastActiveMs) || 0);
+      }
+
+      function pickMostRecentFocusCard(cards) {
+        let best = null;
+        let bestMs = -1;
+        for (const c of cards) {
+          const ms = getCardFocusMs(c);
+          if (ms > bestMs) {
+            bestMs = ms;
+            best = c;
+          }
+        }
+        return best;
+      }
+
       function renderAll() {
         const mainChats = state.conversations.filter((c) => !c.isSubagent);
-        const wsMainChats = state.activeWorkspaceKey
+        const wsFocusChats = state.activeWorkspaceKey
           ? mainChats.filter((c) => c.workspaceKey === state.activeWorkspaceKey)
           : [];
 
         const hostCard = state.hostConvId
           ? state.conversations.find((c) => c.id === state.hostConvId)
           : null;
-        const newestWsCard = wsMainChats[0] || mainChats[0] || state.conversations[0] || null;
+        const candidatePool = state.activeWorkspaceKey
+          ? wsFocusChats
+          : (mainChats.length > 0 ? mainChats : state.conversations);
+        const newestWsCard = pickMostRecentFocusCard(candidatePool);
+
+        const isManuallyPinned = Boolean(hostCard && state.manualPinId && state.manualPinId === hostCard.id);
+        const isInitialUnscopedHost = Boolean(
+          hostCard &&
+          initialHostConvId &&
+          hostCard.id === initialHostConvId &&
+          !hostCard.workspaceKey
+        );
+        const hostDifferentWs =
+          Boolean(state.activeWorkspaceKey) &&
+          Boolean(hostCard) &&
+          hostCard.workspaceKey !== state.activeWorkspaceKey &&
+          !isInitialUnscopedHost;
 
         let pinnedCard = hostCard || newestWsCard;
-        if (hostCard && newestWsCard && newestWsCard.id !== hostCard.id) {
-          const hostDifferentWs =
-            Boolean(state.activeWorkspaceKey) &&
-            Boolean(hostCard.workspaceKey) &&
-            hostCard.workspaceKey !== state.activeWorkspaceKey;
-          const newestTs = newestWsCard.lastUserInputMs || newestWsCard.lastActiveMs || 0;
-          const hostTs = hostCard.lastUserInputMs || hostCard.lastActiveMs || 0;
+        if (hostCard && hostDifferentWs && !isManuallyPinned) {
+          pinnedCard = newestWsCard;
+          state.hostConvId = newestWsCard ? newestWsCard.id : '';
+        } else if (hostCard && newestWsCard && newestWsCard.id !== hostCard.id) {
+          const newestTs = getCardFocusMs(newestWsCard);
+          const hostTs = getCardFocusMs(hostCard);
           const newActivityAfterManualPin =
             !state.manualPinId || newestTs > state.manualPinTs;
 
-          if (hostDifferentWs || (newestTs > hostTs && newActivityAfterManualPin)) {
+          if (newestTs > hostTs && newActivityAfterManualPin) {
             pinnedCard = newestWsCard;
             state.hostConvId = newestWsCard.id;
             state.manualPinId = '';
           }
+        } else if (!hostCard && newestWsCard) {
+          state.hostConvId = newestWsCard.id;
         }
 
         const pinnedId = pinnedCard ? pinnedCard.id : '';
@@ -1363,7 +1380,14 @@
           syncCardDom(activeCardEl, pinnedCard, renderActiveCardHeader(pinnedCard));
           activeWsIndicator.textContent = pinnedCard.workspaceName ? '· ' + pinnedCard.workspaceName : '';
         } else {
-          pinnedContainer.innerHTML = '<div class="empty-box">No active conversation detected yet.</div>';
+          statusDotEl.className = 'dot dot-fresh';
+          const emptyPinnedMsg = state.activeWorkspaceKey
+            ? 'No active conversation in this workspace yet.'
+            : 'No active conversation detected yet.';
+          const emptyPinnedHtml = '<div class="empty-box">' + emptyPinnedMsg + '</div>';
+          if (pinnedContainer.innerHTML !== emptyPinnedHtml) {
+            pinnedContainer.innerHTML = emptyPinnedHtml;
+          }
           activeWsIndicator.textContent = '';
         }
 
@@ -1390,6 +1414,10 @@
           : 'Other conversations in ' + ((wsObj && wsObj.name) || 'workspace');
         listHeaderTitle.textContent = scopeTitle;
         listHeaderCount.textContent = filtered.length + ' chat' + (filtered.length === 1 ? '' : 's');
+
+        if (sectionOtherEl && sectionOtherEl.classList.contains('collapsed')) {
+          return;
+        }
 
         const showWsName = effectiveScope === '__all__';
         if (filtered.length === 0) {
@@ -1446,6 +1474,8 @@
       }
 
       async function fetchStatus(force = false) {
+        if (!force && state.pollInFlight) return;
+        state.pollInFlight = true;
         try {
           const currentQuery = state.searchQuery.trim();
           const queryChanged = currentQuery !== state.lastFetchedQuery;
@@ -1480,8 +1510,6 @@
             state.hostConvId = String(data.hostConversationId).trim().toLowerCase();
           }
           state.activeWorkspaceKey = data.activeWorkspaceKey || '';
-          state.activeWorkspaceName = data.activeWorkspaceName || '';
-          state.globalObservedCeiling = data.globalObservedCeiling || 0;
           state.workspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
           state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
           state.searchMatches = data.searchMatches || null;
@@ -1490,6 +1518,8 @@
           await checkPendingSmartHandoff();
         } catch (err) {
           console.error('[ContextHealth] status poll failed:', err);
+        } finally {
+          state.pollInFlight = false;
         }
       }
 
@@ -1594,8 +1624,6 @@
         cancelPendingSmartHandoff();
         const activeTa = document.querySelector('textarea.handoff-input[data-focus-conv="' + convId + '"]');
         if (activeTa) {
-          activeTa.value = finalPrompt;
-          activeTa.scrollTop = 0;
           activeTa.focus();
         }
         showToast('AI handoff prompt ready for review');
@@ -1610,13 +1638,10 @@
 
         try {
           const { data } = await fetchHandoffData(convId, focus);
-          const title = focus ? 'Handoff: ' + focus.slice(0, 40) : 'Context Handoff';
 
           if (window.sidecar && window.sidecar.agent && typeof window.sidecar.agent.sendMessage === 'function') {
             state.pendingSmartHandoff = {
               convId,
-              focus,
-              title,
               baselineHandoffMs: (card && card.latestHandoffMs) || 0,
               baselinePromptText: (card && card.latestHandoffPrompt) || '',
               requestedAtMs: Date.now(),
@@ -1626,7 +1651,7 @@
 
             if (smartHandoffPollTimer) clearInterval(smartHandoffPollTimer);
             smartHandoffPollTimer = setInterval(() => {
-              fetchStatus(true);
+              fetchStatus(false);
             }, 1200);
 
             try {
@@ -1654,19 +1679,15 @@
       }
 
       async function handleStartNewChatFromHandoff(convId) {
-        const hState = getHandoffState(convId);
         const promptText = readCurrentHandoffText(convId).trim();
         if (!promptText) {
           showToast('Handoff prompt is empty');
           return;
         }
-        const title = hState.focusUsed
-          ? 'Handoff: ' + hState.focusUsed.slice(0, 40)
-          : 'Context Handoff';
 
         if (window.sidecar && window.sidecar.agent && typeof window.sidecar.agent.startConversation === 'function') {
           try {
-            const res = await window.sidecar.agent.startConversation(promptText, title);
+            const res = await window.sidecar.agent.startConversation(promptText);
             if (res && res.error) {
               throw new Error(res.error);
             }
@@ -1719,8 +1740,9 @@
           const sec = actionBtn.getAttribute('data-section');
           if (sec === 'other' && sectionOtherEl) {
             const isCollapsed = sectionOtherEl.classList.toggle('collapsed');
-            if (isCollapsed) state.collapsedSections.add(sec);
-            else state.collapsedSections.delete(sec);
+            if (!isCollapsed) {
+              renderAll();
+            }
           }
           return;
         }
@@ -1729,7 +1751,7 @@
           const targetCard = state.conversations.find((c) => c.id === convId);
           state.hostConvId = convId;
           state.manualPinId = convId;
-          state.manualPinTs = (targetCard && (targetCard.lastUserInputMs || targetCard.lastActiveMs)) || Date.now();
+          state.manualPinTs = Math.max(getCardFocusMs(targetCard), Date.now());
           renderAll();
           openConversationInHost(convId);
         } else if (action === 'toggle-details' && convId) {
@@ -1804,9 +1826,19 @@
         state.searchQuery = searchInput.value;
         clearTimeout(searchTimer);
         searchTimer = setTimeout(() => {
-          fetchStatus(true);
+          fetchStatus(false);
         }, 120);
       });
+
+      function updateWorkspaceUris(uris) {
+        const nextUris = Array.isArray(uris) ? uris : [];
+        const nextJson = JSON.stringify(nextUris);
+        if (nextJson === state.lastWorkspaceUrisJson) return false;
+        state.workspaceUris = nextUris;
+        state.lastWorkspaceUrisJson = nextJson;
+        state.version = 0;
+        return true;
+      }
 
       btnRefresh.addEventListener('click', async () => {
         state.selectedWorkspaceKey = '__auto__';
@@ -1816,7 +1848,7 @@
           try {
             const uris = await window.sidecar.getWorkspaceUris();
             if (Array.isArray(uris) && uris.length > 0) {
-              state.workspaceUris = uris;
+              updateWorkspaceUris(uris);
             }
           } catch {}
         }
@@ -1825,26 +1857,36 @@
         showToast('Refreshed');
       });
 
-      if (window.sidecar) {
-        if (typeof window.sidecar.getWorkspaceUris === 'function') {
-          window.sidecar.getWorkspaceUris().then((uris) => {
-            if (Array.isArray(uris) && uris.length > 0) {
-              state.workspaceUris = uris;
-              fetchStatus(true);
-            }
-          }).catch(() => {});
-        }
-        if (typeof window.sidecar.onWorkspaceChange === 'function') {
-          window.sidecar.onWorkspaceChange((uris) => {
-            state.workspaceUris = Array.isArray(uris) ? uris : [];
-            fetchStatus(true);
-          });
-        }
+      if (window.sidecar && typeof window.sidecar.onWorkspaceChange === 'function') {
+        window.sidecar.onWorkspaceChange((uris) => {
+          if (updateWorkspaceUris(uris)) {
+            fetchStatus(false);
+          }
+        });
       }
 
-      fetchStatus(true);
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+          fetchStatus(false);
+        }
+      });
+
+      (async () => {
+        if (window.sidecar && typeof window.sidecar.getWorkspaceUris === 'function') {
+          try {
+            const uris = await window.sidecar.getWorkspaceUris();
+            if (Array.isArray(uris) && uris.length > 0) {
+              updateWorkspaceUris(uris);
+            }
+          } catch {}
+        }
+        await fetchStatus(true);
+      })();
+
       setInterval(() => {
-        fetchStatus(false);
+        if (!document.hidden) {
+          fetchStatus(false);
+        }
       }, 3000);
     })();
   </script>

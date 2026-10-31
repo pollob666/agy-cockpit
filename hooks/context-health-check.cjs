@@ -6,13 +6,17 @@ const path = require('node:path');
 const { fileURLToPath } = require('node:url');
 
 const CHECKPOINT_TOKEN = Buffer.from('"type":"CHECKPOINT"', 'utf-8');
-const CREATED_AT_RE = /"created_at"\s*:\s*"([^"]+)"/g;
+const USER_INPUT_TOKEN = Buffer.from('"type":"USER_INPUT"', 'utf-8');
+const PLANNER_TOKEN = Buffer.from('"type":"PLANNER_RESPONSE"', 'utf-8');
+const HANDOFF_MARKER = Buffer.from('[Context Health Smart Handoff]', 'utf-8');
+const CREATED_AT_SINGLE_RE = /"created_at"\s*:\s*"([^"]+)"/;
 const GIT_COMMIT_OUT_RE = /\[[\w./-]+(?:\s+\([^)]+\))?\s+([0-9a-f]{7,12})\]/g;
+const REFLOG_ACTION_RE = /^(?:commit(?:\s*\([^)]+\))?:|merge\b|pull\b|cherry-pick\b|rebase(?:\s*\((?!start\b|finish\b|abort\b)[^)]+\))?:)/i;
 const APP_CANDIDATES = ['antigravity', 'antigravity-ide', 'antigravity-cli'];
 
-function normalizePath(rawInput) {
+function normalizeWorkspacePath(rawInput) {
   if (!rawInput || typeof rawInput !== 'string') return '';
-  let p = rawInput.trim();
+  let p = rawInput.trim().replace(/^["']+|["']+$/g, '').trim();
   if (!p) return '';
   if (p.startsWith('file://')) {
     try {
@@ -22,7 +26,15 @@ function normalizePath(rawInput) {
       if (process.platform !== 'win32' && !p.startsWith('/')) p = '/' + p;
     }
   }
-  return p.replace(/^["']+|["']+$/g, '').trim();
+  p = p.replace(/^["']+|["']+$/g, '').trim();
+  p = p.replace(/\\\\/g, '/').replace(/\\/g, '/');
+  if (p.length > 1 && p.endsWith('/')) {
+    p = p.replace(/\/+$/, '');
+  }
+  if (process.platform === 'win32' && /^[A-Za-z]:/.test(p)) {
+    p = p[0].toLowerCase() + p.slice(1);
+  }
+  return p;
 }
 
 function resolveFallbackTranscriptPath(conversationId) {
@@ -57,12 +69,23 @@ function resolveFallbackTranscriptPath(conversationId) {
   return '';
 }
 
-function scanTranscriptFast(transcriptPath) {
+function extractTimestampAround(data, tokenIdx) {
+  const lineStart = data.lastIndexOf(0x0a, tokenIdx) + 1;
+  const nextNl = data.indexOf(0x0a, tokenIdx);
+  const lineEnd = nextNl === -1 ? data.length : nextNl;
+  const headerSlice = data.subarray(lineStart, Math.min(lineEnd, lineStart + 1024)).toString('utf-8');
+  const m = CREATED_AT_SINGLE_RE.exec(headerSlice);
+  if (!m) return 0;
+  const ms = Date.parse(m[1]);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function scanTranscriptFast(transcriptPath, preStat) {
   let fd;
   try {
-    const stat = fs.statSync(transcriptPath, { throwIfNoEntry: false });
+    const stat = preStat || fs.statSync(transcriptPath, { throwIfNoEntry: false });
     if (!stat || !stat.isFile() || stat.size === 0) {
-      return { compactCount: 0, lastActiveMs: 0, mentionedCommits: new Set() };
+      return { compactCount: 0, promptCount: 0, lastActiveMs: 0, mentionedCommits: new Set() };
     }
 
     fd = fs.openSync(transcriptPath, 'r');
@@ -79,31 +102,46 @@ function scanTranscriptFast(transcriptPath) {
       searchIdx = found + CHECKPOINT_TOKEN.length;
     }
 
-    const tailSize = Math.min(bytesRead, 64 * 1024);
-    const tailText = data.subarray(bytesRead - tailSize).toString('utf-8');
+    let promptCount = 0;
+    searchIdx = 0;
+    while (true) {
+      const found = data.indexOf(USER_INPUT_TOKEN, searchIdx);
+      if (found === -1) break;
+      const lineStart = data.lastIndexOf(0x0a, found) + 1;
+      const nextNl = data.indexOf(0x0a, found);
+      const lineEnd = nextNl === -1 ? bytesRead : nextNl;
+      const lineSlice = data.subarray(lineStart, lineEnd);
+      if (lineSlice.indexOf(HANDOFF_MARKER) === -1) {
+        promptCount += 1;
+      }
+      searchIdx = lineEnd + 1;
+    }
 
     let lastActiveMs = 0;
-    let match;
-    CREATED_AT_RE.lastIndex = 0;
-    while ((match = CREATED_AT_RE.exec(tailText)) !== null) {
-      const ms = Date.parse(match[1]);
-      if (Number.isFinite(ms) && ms > lastActiveMs) {
+    let searchEnd = bytesRead;
+    while (searchEnd > 0) {
+      const plannerIdx = data.lastIndexOf(PLANNER_TOKEN, searchEnd - 1);
+      if (plannerIdx === -1) break;
+      const ms = extractTimestampAround(data, plannerIdx);
+      if (ms > 0) {
         lastActiveMs = ms;
+        break;
       }
-    }
-    if (!lastActiveMs) {
-      lastActiveMs = stat.mtimeMs;
+      searchEnd = data.lastIndexOf(0x0a, plannerIdx);
     }
 
+    const scanWindow = Math.min(bytesRead, 2 * 1024 * 1024);
+    const scanText = data.subarray(bytesRead - scanWindow).toString('utf-8');
     const mentionedCommits = new Set();
+    let match;
     GIT_COMMIT_OUT_RE.lastIndex = 0;
-    while ((match = GIT_COMMIT_OUT_RE.exec(tailText)) !== null) {
+    while ((match = GIT_COMMIT_OUT_RE.exec(scanText)) !== null) {
       mentionedCommits.add(match[1].slice(0, 7).toLowerCase());
     }
 
-    return { compactCount, lastActiveMs, mentionedCommits };
+    return { compactCount, promptCount, lastActiveMs, mentionedCommits };
   } catch {
-    return { compactCount: 0, lastActiveMs: 0, mentionedCommits: new Set() };
+    return { compactCount: 0, promptCount: 0, lastActiveMs: 0, mentionedCommits: new Set() };
   } finally {
     if (fd !== undefined) {
       try { fs.closeSync(fd); } catch {}
@@ -112,7 +150,7 @@ function scanTranscriptFast(transcriptPath) {
 }
 
 function findGitRoot(startDir) {
-  let curr = normalizePath(startDir);
+  let curr = normalizeWorkspacePath(startDir);
   if (!curr) return '';
   for (let i = 0; i < 12; i++) {
     try {
@@ -155,7 +193,7 @@ function countCommitsBehindFast(workspaceDir, lastActiveMs, mentionedCommits) {
       if (tabIdx < 0) continue;
       const meta = line.slice(0, tabIdx).trim();
       const action = line.slice(tabIdx + 1).trim();
-      if (!/^(?:commit(?:\s*\([^)]+\))?:|merge\b|pull\b|cherry-pick\b|rebase\b)/i.test(action)) {
+      if (!REFLOG_ACTION_RE.test(action)) {
         continue;
       }
       const metaMatch = /^([0-9a-f]{40})\s+([0-9a-f]{40})\s+.*\s+(\d{9,12})\s+([+-]\d{4})$/i.exec(meta);
@@ -180,34 +218,44 @@ function countCommitsBehindFast(workspaceDir, lastActiveMs, mentionedCommits) {
   }
 }
 
-function tierLabel(compactCount) {
-  if (compactCount <= 2) return 'Fresh';
+function tierLabel(compactCount, promptCount = 0) {
+  const compactedPrompts = compactCount > 0 ? Math.max(0, promptCount - 10) : 0;
+  if (compactCount <= 2 && compactedPrompts === 0) return 'Fresh';
   if (compactCount <= 5) return 'Warm';
   if (compactCount <= 9) return 'Heavy';
   return 'Polluted';
 }
 
 function evaluateHookPayload(payload = {}) {
-  const convId = payload.conversationId || '';
-  const rawTranscriptPath = normalizePath(payload.transcriptPath || '');
-  const transcriptPath =
-    (rawTranscriptPath && fs.existsSync(rawTranscriptPath) ? rawTranscriptPath : '') ||
-    resolveFallbackTranscriptPath(convId);
+  const convId = payload.conversationId || payload.conversation_id || '';
+  const rawTranscriptPath = normalizeWorkspacePath(payload.transcriptPath || payload.transcript_path || '');
+  let preStat = null;
+  if (rawTranscriptPath) {
+    try {
+      const st = fs.statSync(rawTranscriptPath, { throwIfNoEntry: false });
+      if (st && st.isFile()) preStat = st;
+    } catch {}
+  }
+  const transcriptPath = preStat ? rawTranscriptPath : resolveFallbackTranscriptPath(convId);
 
   if (!transcriptPath) {
     return {};
   }
 
-  const { compactCount, lastActiveMs, mentionedCommits } = scanTranscriptFast(transcriptPath);
-  const workspacePaths = Array.isArray(payload.workspacePaths) ? payload.workspacePaths : [];
-  const primaryWorkspace = workspacePaths.length > 0 ? normalizePath(workspacePaths[0]) : '';
+  const { compactCount, promptCount, lastActiveMs, mentionedCommits } = scanTranscriptFast(transcriptPath, preStat);
+  const workspacePaths = Array.isArray(payload.workspacePaths)
+    ? payload.workspacePaths
+    : (Array.isArray(payload.workspaceUris) ? payload.workspaceUris : []);
+  const primaryWorkspace = workspacePaths.length > 0
+    ? normalizeWorkspacePath(workspacePaths[0])
+    : normalizeWorkspacePath(payload.workspaceRoot || payload.workspace_root || '');
   const commitsBehind = countCommitsBehindFast(primaryWorkspace, lastActiveMs, mentionedCommits);
 
   if (compactCount < 10 && commitsBehind === 0) {
     return {};
   }
 
-  const parts = [`${compactCount} compacts (${tierLabel(compactCount)})`];
+  const parts = [`${compactCount} compact${compactCount === 1 ? '' : 's'} (${tierLabel(compactCount, promptCount)})`];
   if (commitsBehind > 0) {
     parts.push(`${commitsBehind} commit${commitsBehind === 1 ? '' : 's'} behind HEAD`);
   } else {
@@ -246,5 +294,6 @@ module.exports = {
   evaluateHookPayload,
   scanTranscriptFast,
   countCommitsBehindFast,
+  normalizeWorkspacePath,
   tierLabel
 };

@@ -49,7 +49,7 @@ Monitors conversation context pollution caused by successive context compactions
 
 1. **Incremental Append-Only Transcript Indexing**:
    - `server.cjs` caches `mtimeMs`, `size`, and `parsedBytes` per conversation in memory and persists `index_cache.json`.
-   - On subsequent polls, only newly appended bytes (`stat.size - parsedBytes`) are read from disk, and `"type":"GENERIC"` lines are skipped before `JSON.parse` once the workspace root is known (`< 1 ms` per status poll).
+   - On subsequent polls, only newly appended bytes (`stat.size - parsedBytes`) are read from disk, and `"type":"GENERIC"` lines are skipped before `JSON.parse` (`< 1 ms` per status poll).
 2. **Zero-Process Git Reflog Tail Parser + `.git/HEAD` Mtime Guard**:
    - Both the hook and server inspect `.git/HEAD` and `.git/logs/HEAD` `mtimeMs` first (`0.2 ms`, zero child processes spawned in the `PreInvocation` hook).
 
