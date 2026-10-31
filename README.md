@@ -12,10 +12,10 @@ Monitors conversation context pollution caused by successive context compactions
 - **No internal step numbers**: Tracks conversations strictly in terms of **Compacts** (`"type":"CHECKPOINT"`) and **User Prompts** (`"type":"USER_INPUT"`).
 - **Compaction Scale**:
   - `0 to 2 compacts` (with `0` compacted prompts): **Fresh** (`#10b981`)
-  - `3 to 5 compacts` (or `0 to 2` compacts once earlier prompts are compacted): **Warm** (`#38bdf8`)
-  - `6 to 9 compacts`: **Heavy** (`#f59e0b`)
+  - `3 to 5 compacts` (or `0 to 2` compacts once earlier prompts are compacted): **Warm** (`#eab308`)
+  - `6 to 9 compacts`: **Heavy** (`#f97316`)
   - `10+ compacts`: **Polluted** (`#ef4444`)
-- **Prompt Retention Metric**: Each Antigravity compaction retains only the last 10 user requests verbatim. When `compacts >= 1` and `prompts > 10`, the active card displays `10 verbatim · M compacted`.
+- **Prompt Retention Metric**: Each Antigravity compaction retains only the last 10 user requests in full. When `compacts >= 1` and `prompts > 10`, the active card displays `Prompts: 10 full · M compacted`.
 - **Dynamic Compact Threshold (Zero Hardcoded Limits)**:
   - Reads `currentTokens = input_tokens + cache_read_tokens` from the latest `PLANNER_RESPONSE`.
   - Records `compactTriggerTokens` immediately preceding each `CHECKPOINT` and computes `observedCompactCeiling` as their rolling median.
@@ -34,11 +34,9 @@ Monitors conversation context pollution caused by successive context compactions
 - **Real-Time Search**: Searches across all `USER_INPUT` prompts and `Task Overview` checkpoint summaries.
 - **Clamped Prompt History**: Expanding `History & Commits` lists missed Git commits, the latest compact overview, and user prompts clamped to 3 lines (`Show more` / `Show less`).
 
-### 5. Dual Handoff System
-- **`Smart Handoff`**: Opens an optional focus input with two actions:
-  - **Start New Chat**: Uses `window.sidecar.agent.startConversation(...)` to launch a brand-new conversation pre-populated with the latest checkpoint summary and recent prompts.
-  - **Ask Agent to Draft**: Uses `window.sidecar.agent.sendMessage(...)` to ask the agent in the source conversation to draft a self-contained handoff block.
-- **`Copy Summary`**: Reads the full `<summary>` from the last `CHECKPOINT` in `transcript_full.jsonl` plus recent prompts since that compact and copies a ready-to-paste Markdown handoff to the clipboard in `< 5 ms`.
+### 5. Two-Step Smart Handoff
+- **Step 1 (Optional Focus & AI Generation)**: Opens a large editable textarea where you can optionally specify focus instructions, then sends a `<HANDOFF_PROMPT>` request to the conversation's main agent via `window.sidecar.agent.sendMessage(...)`.
+- **Step 2 (In-Place Review, Edit & Launch)**: Once the agent generates the `<HANDOFF_PROMPT>` block, it is loaded directly into the same textarea in the plugin so you can review and edit it in place before clicking **Start New Chat** (`window.sidecar.agent.startConversation(...)`) or **Copy**.
 
 ### 6. Lightweight `PreInvocation` Hook (`< 20 ms`)
 - Runs before each user turn via `~/.gemini/config/hooks.json`.
@@ -52,9 +50,7 @@ Monitors conversation context pollution caused by successive context compactions
 1. **Incremental Append-Only Transcript Indexing**:
    - `server.cjs` caches `mtimeMs`, `size`, and `parsedBytes` per conversation in memory and persists `index_cache.json`.
    - On subsequent polls, only newly appended bytes (`stat.size - parsedBytes`) are read from disk, and `"type":"GENERIC"` lines are skipped before `JSON.parse` once the workspace root is known (`< 1 ms` per status poll).
-2. **Reverse Tail-Chunk Reader on `transcript_full.jsonl`**:
-   - Instead of loading multi-megabyte `transcript_full.jsonl` files into memory, `/api/handoff-summary` reads 256 KB chunks backward from `EOF` until it hits the last `"type":"CHECKPOINT"` line (`< 3 ms`).
-3. **Zero-Process Git Reflog Tail Parser + `.git/HEAD` Mtime Guard**:
+2. **Zero-Process Git Reflog Tail Parser + `.git/HEAD` Mtime Guard**:
    - Both the hook and server inspect `.git/HEAD` and `.git/logs/HEAD` `mtimeMs` first (`0.2 ms`, zero child processes spawned in the `PreInvocation` hook).
 
 ---

@@ -7,7 +7,7 @@ const { fileURLToPath } = require('node:url');
 
 const CHECKPOINT_TOKEN = Buffer.from('"type":"CHECKPOINT"', 'utf-8');
 const CREATED_AT_RE = /"created_at"\s*:\s*"([^"]+)"/g;
-const GIT_COMMIT_OUT_RE = /\[[\w./-]+ ([0-9a-f]{7,12})\]/g;
+const GIT_COMMIT_OUT_RE = /\[[\w./-]+(?:\s+\([^)]+\))?\s+([0-9a-f]{7,12})\]/g;
 const APP_CANDIDATES = ['antigravity', 'antigravity-ide', 'antigravity-cli'];
 
 function normalizePath(rawInput) {

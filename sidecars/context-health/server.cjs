@@ -14,7 +14,7 @@ const APP_CANDIDATES = ['antigravity', 'antigravity-ide', 'antigravity-cli'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SENDER_UUID_RE = /\bsender=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![/a-z0-9_-])/i;
 const CHILD_CONV_RE = /\bconversation(?:Id|_id)?["'\s:=]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i;
-const GIT_COMMIT_OUT_RE = /\[[\w./-]+ ([0-9a-f]{7,12})\]/g;
+const GIT_COMMIT_OUT_RE = /\[[\w./-]+(?:\s+\([^)]+\))?\s+([0-9a-f]{7,12})\]/g;
 
 const FALLBACK_PRELOAD_JS = `(function() {
   const params = new URLSearchParams(window.location.search);
@@ -75,24 +75,33 @@ const FALLBACK_PRELOAD_JS = `(function() {
           method: 'POST',
           body: JSON.stringify({ conversationId: convId || conversationId, message })
         });
-        if (!res.ok) throw new Error(await res.text());
-        return res.json();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || (data && data.error)) {
+          throw new Error((data && data.error) || 'Failed to send message to agent');
+        }
+        return data;
       },
       async startConversation(message, title) {
         const res = await secureFetch('/_sidecar/new-conversation', {
           method: 'POST',
           body: JSON.stringify({ message, title })
         });
-        if (!res.ok) throw new Error(await res.text());
-        return res.json();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || (data && data.error)) {
+          throw new Error((data && data.error) || 'Failed to start conversation');
+        }
+        return data;
       },
       async getConversationMetadata(convId) {
         const res = await secureFetch('/_sidecar/get-conversation-metadata', {
           method: 'POST',
           body: JSON.stringify({ conversationId: convId || conversationId })
         });
-        if (!res.ok) throw new Error(await res.text());
-        return res.json();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || (data && data.error)) {
+          throw new Error((data && data.error) || 'Failed to get conversation metadata');
+        }
+        return data;
       }
     },
     ui: {
@@ -275,10 +284,10 @@ function classifyPollution(compactCount, compactedPrompts = 0) {
     return { id: 'fresh', label: 'Fresh', color: '#10b981' };
   }
   if (compactCount <= 5) {
-    return { id: 'warm', label: 'Warm', color: '#38bdf8' };
+    return { id: 'warm', label: 'Warm', color: '#eab308' };
   }
   if (compactCount <= 9) {
-    return { id: 'heavy', label: 'Heavy', color: '#f59e0b' };
+    return { id: 'heavy', label: 'Heavy', color: '#f97316' };
   }
   return { id: 'polluted', label: 'Polluted', color: '#ef4444' };
 }
@@ -337,6 +346,7 @@ function createEmptyEntry(convId) {
     parsedBytes: 0,
     lastActiveIso: '',
     lastActiveMs: 0,
+    lastUserInputMs: 0,
     isSubagent: false,
     parentConvId: '',
     spawnedSubagentIds: [],
@@ -346,12 +356,20 @@ function createEmptyEntry(convId) {
     promptCount: 0,
     currentTokens: 0,
     lastPlannerTokens: 0,
+    totalInputTokens: 0,
+    totalCacheReadTokens: 0,
+    totalOutputTokens: 0,
+    totalTokens: 0,
     compactTriggerTokens: [],
     workspacePath: '',
     workspaceCounts: {},
+    title: '',
     firstPrompt: '',
     lastPrompt: '',
-    lastModelResponse: '',
+    latestHandoffPrompt: '',
+    latestHandoffMs: 0,
+    awaitingHandoffResponse: false,
+    needsFullHandoffRead: false,
     checkpointOverview: '',
     prompts: [],
     mentionedCommits: []
@@ -425,8 +443,16 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.lastActiveIso = createdAt;
       entry.lastActiveMs = createdMs;
     }
+    if (createdAt && createdMs >= (entry.lastUserInputMs || 0)) {
+      entry.lastUserInputMs = createdMs;
+    }
     const clean = cleanUserPrompt(content);
     if (clean) {
+      if (clean.startsWith('[Context Health Smart Handoff]')) {
+        entry.awaitingHandoffResponse = true;
+        return false;
+      }
+      entry.awaitingHandoffResponse = false;
       entry.promptCount += 1;
       entry.promptsSinceLastCompact += 1;
       if (!entry.firstPrompt) entry.firstPrompt = clean.slice(0, 500);
@@ -449,15 +475,46 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.lastActiveIso = createdAt;
       entry.lastActiveMs = createdMs;
     }
-    const inTok = typeof obj.input_tokens === 'number' ? obj.input_tokens : 0;
-    const cacheTok = typeof obj.cache_read_tokens === 'number' ? obj.cache_read_tokens : 0;
+    const inTok = typeof obj.input_tokens === 'number' && obj.input_tokens > 0 ? obj.input_tokens : 0;
+    const cacheTok = typeof obj.cache_read_tokens === 'number' && obj.cache_read_tokens > 0 ? obj.cache_read_tokens : 0;
+    const outTok = typeof obj.output_tokens === 'number' && obj.output_tokens > 0 ? obj.output_tokens : 0;
     const totalTok = inTok + cacheTok;
     if (totalTok > 0) {
       entry.lastPlannerTokens = totalTok;
       entry.currentTokens = totalTok;
     }
+    const stepTotalTok = totalTok + outTok;
+    if (stepTotalTok > 0) {
+      entry.totalInputTokens = (entry.totalInputTokens || 0) + inTok;
+      entry.totalCacheReadTokens = (entry.totalCacheReadTokens || 0) + cacheTok;
+      entry.totalOutputTokens = (entry.totalOutputTokens || 0) + outTok;
+      entry.totalTokens = entry.totalInputTokens + entry.totalCacheReadTokens + entry.totalOutputTokens;
+    }
     if (content && content.trim()) {
-      entry.lastModelResponse = content.trim().slice(0, 1500);
+      const trimmedContent = content.trim();
+      const isTruncatedContent =
+        Array.isArray(obj.truncated_fields) && obj.truncated_fields.includes('content');
+      const handoffMatch = /<HANDOFF_PROMPT>\s*([\s\S]*?)\s*<\/HANDOFF_PROMPT>/i.exec(trimmedContent);
+      if (handoffMatch && handoffMatch[1].trim() && !isTruncatedContent) {
+        entry.latestHandoffPrompt = handoffMatch[1].trim();
+        entry.latestHandoffMs = createdMs || Date.now();
+        entry.awaitingHandoffResponse = false;
+      } else if (
+        isTruncatedContent &&
+        (/<HANDOFF_PROMPT>/i.test(trimmedContent) ||
+          (entry.awaitingHandoffResponse && (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)))
+      ) {
+        entry.needsFullHandoffRead = true;
+        entry.latestHandoffMs = createdMs || Date.now();
+        entry.awaitingHandoffResponse = false;
+      } else if (
+        entry.awaitingHandoffResponse &&
+        (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)
+      ) {
+        entry.latestHandoffPrompt = trimmedContent;
+        entry.latestHandoffMs = createdMs || Date.now();
+        entry.awaitingHandoffResponse = false;
+      }
     }
 
     if (Array.isArray(obj.tool_calls)) {
@@ -526,8 +583,54 @@ function processTranscriptLine(entry, line, isFirstLine) {
   return false;
 }
 
+function decodePbtxtString(escaped) {
+  if (!escaped) return '';
+  const bytes = [];
+  let i = 0;
+  while (i < escaped.length) {
+    if (escaped[i] === '\\' && i + 1 < escaped.length) {
+      const next = escaped[i + 1];
+      if (next >= '0' && next <= '7') {
+        let oct = next;
+        let step = 2;
+        if (i + 2 < escaped.length && escaped[i + 2] >= '0' && escaped[i + 2] <= '7') {
+          oct += escaped[i + 2];
+          step += 1;
+          if (i + 3 < escaped.length && escaped[i + 3] >= '0' && escaped[i + 3] <= '7') {
+            oct += escaped[i + 3];
+            step += 1;
+          }
+        }
+        bytes.push(parseInt(oct, 8) & 0xff);
+        i += step;
+        continue;
+      }
+      if (next === 'n') bytes.push(10);
+      else if (next === 'r') bytes.push(13);
+      else if (next === 't') bytes.push(9);
+      else if (next === '"' || next === '\'' || next === '\\') bytes.push(next.charCodeAt(0));
+      else bytes.push(...Buffer.from(next, 'utf-8'));
+      i += 2;
+      continue;
+    }
+    const codePoint = escaped.codePointAt(i);
+    const charStr = String.fromCodePoint(codePoint);
+    bytes.push(...Buffer.from(charStr, 'utf-8'));
+    i += charStr.length;
+  }
+  return Buffer.from(bytes).toString('utf-8').trim();
+}
+
+function extractTitleFromPbtxt(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const match = /\btitle\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw);
+  if (!match) return '';
+  return decodePbtxtString(match[1]);
+}
+
 function rebuildSearchCorpus(entry) {
   const parts = [];
+  if (entry.title) parts.push(entry.title);
   if (entry.firstPrompt) parts.push(entry.firstPrompt);
   if (entry.lastPrompt) parts.push(entry.lastPrompt);
   if (entry.checkpointOverview) parts.push(entry.checkpointOverview);
@@ -608,6 +711,43 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
     isFirstLine = false;
   }
 
+  if (entry.needsFullHandoffRead) {
+    entry.needsFullHandoffRead = false;
+    const fullPath = path.join(path.dirname(transcriptPath), 'transcript_full.jsonl');
+    if (isFile(fullPath)) {
+      let fullFd;
+      try {
+        const fStat = fs.statSync(fullPath);
+        const rSize = Math.min(fStat.size, 256 * 1024);
+        fullFd = fs.openSync(fullPath, 'r');
+        const fBuf = Buffer.allocUnsafe(rSize);
+        const fRead = fs.readSync(fullFd, fBuf, 0, rSize, Math.max(0, fStat.size - rSize));
+        const fLines = fBuf.subarray(0, fRead).toString('utf-8').split('\n');
+        for (let i = fLines.length - 1; i >= 0; i--) {
+          const fl = fLines[i].trim();
+          if (!fl || !fl.includes('"type":"PLANNER_RESPONSE"')) continue;
+          try {
+            const fObj = JSON.parse(fl);
+            if (fObj.type === 'PLANNER_RESPONSE' && typeof fObj.content === 'string' && fObj.content.trim()) {
+              const m = /<HANDOFF_PROMPT>\s*([\s\S]*?)\s*<\/HANDOFF_PROMPT>/i.exec(fObj.content);
+              if (m && m[1].trim()) {
+                entry.latestHandoffPrompt = m[1].trim();
+                break;
+              } else if (!Array.isArray(fObj.tool_calls) || fObj.tool_calls.length === 0) {
+                entry.latestHandoffPrompt = fObj.content.trim();
+                break;
+              }
+            }
+          } catch {}
+        }
+      } catch {} finally {
+        if (fullFd !== undefined) {
+          try { fs.closeSync(fullFd); } catch {}
+        }
+      }
+    }
+  }
+
   entry.parsedBytes = lastNewlineIdx >= 0 ? startOffset + lastNewlineIdx + 1 : stat.size;
   entry.size = stat.size;
   entry.mtimeMs = stat.mtimeMs;
@@ -619,59 +759,6 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
     rebuildSearchCorpus(entry);
   }
   return { entry, changed: true };
-}
-
-function readLastCheckpointFromFullTranscript(fullTranscriptPath, fallbackEntry) {
-  if (isFile(fullTranscriptPath)) {
-    let fd;
-    try {
-      const stat = fs.statSync(fullTranscriptPath);
-      fd = fs.openSync(fullTranscriptPath, 'r');
-      const chunkSize = 256 * 1024;
-      let pos = stat.size;
-      let carryBuf = Buffer.alloc(0);
-
-      while (pos > 0) {
-        const readSize = Math.min(chunkSize, pos);
-        pos -= readSize;
-        const buf = Buffer.allocUnsafe(readSize);
-        const bytesRead = fs.readSync(fd, buf, 0, readSize, pos);
-        const combined = carryBuf.length > 0
-          ? Buffer.concat([buf.subarray(0, bytesRead), carryBuf])
-          : buf.subarray(0, bytesRead);
-
-        let parseSlice = combined;
-        if (pos > 0) {
-          const firstNl = combined.indexOf(0x0a);
-          if (firstNl === -1) {
-            carryBuf = Buffer.from(combined);
-            continue;
-          }
-          carryBuf = Buffer.from(combined.subarray(0, firstNl));
-          parseSlice = combined.subarray(firstNl + 1);
-        } else {
-          carryBuf = Buffer.alloc(0);
-        }
-
-        const lines = parseSlice.toString('utf-8').split('\n');
-        for (let i = lines.length - 1; i >= 0; i--) {
-          const line = lines[i].trim();
-          if (!line || !line.includes('"type":"CHECKPOINT"')) continue;
-          try {
-            const obj = JSON.parse(line);
-            if (obj.type === 'CHECKPOINT' && typeof obj.content === 'string' && obj.content.trim()) {
-              return obj.content.trim();
-            }
-          } catch {}
-        }
-      }
-    } catch {} finally {
-      if (fd !== undefined) {
-        try { fs.closeSync(fd); } catch {}
-      }
-    }
-  }
-  return fallbackEntry?.checkpointOverview || '';
 }
 
 function parseGitReflogTail(repoPath, maxEntries = 200) {
@@ -843,28 +930,59 @@ class GitRepoCache {
   }
 }
 
-function resolveAgentApiCommand() {
-  const exe = process.env.ANTIGRAVITY_AGENTAPI_EXE?.trim();
-  const file = exe || 'agentapi';
-  const isDirectAgentApi = !exe || path.basename(exe).toLowerCase().startsWith('agentapi');
-  return {
-    file,
-    prefix: isDirectAgentApi ? [] : ['agentapi']
-  };
+function resolveAgentApiCommand(appDataDir) {
+  const envExe = process.env.ANTIGRAVITY_AGENTAPI_EXE?.trim();
+  if (envExe && isFile(envExe)) {
+    const isDirect = path.basename(envExe).toLowerCase().startsWith('agentapi');
+    return { file: envExe, prefix: isDirect ? [] : ['agentapi'], shell: false };
+  }
+
+  if (process.platform === 'win32') {
+    const localApp = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    const langServer = path.join(localApp, 'Programs', 'antigravity', 'resources', 'bin', 'language_server.exe');
+    if (isFile(langServer)) {
+      return { file: langServer, prefix: ['agentapi'], shell: false };
+    }
+    const candidateDirs = [
+      appDataDir,
+      path.join(os.homedir(), '.gemini', 'antigravity')
+    ].filter(Boolean);
+    for (const d of candidateDirs) {
+      const bat = path.join(d, 'bin', 'agentapi.bat');
+      if (isFile(bat)) {
+        try {
+          const batContent = fs.readFileSync(bat, 'utf-8');
+          const exeMatch = /"([^"]+\.exe)"/i.exec(batContent);
+          if (exeMatch && isFile(exeMatch[1])) {
+            return { file: exeMatch[1], prefix: ['agentapi'], shell: false };
+          }
+        } catch {}
+        return { file: bat, prefix: [], shell: true };
+      }
+    }
+    return { file: 'agentapi', prefix: [], shell: true };
+  }
+
+  const nixBin = path.join(appDataDir || resolveAppDataDir(), 'bin', 'agentapi');
+  if (isFile(nixBin)) {
+    return { file: nixBin, prefix: [], shell: false };
+  }
+  return { file: 'agentapi', prefix: [], shell: false };
 }
 
-function execAgentApi(args, projectId, timeoutMs = 12000) {
+function execAgentApi(args, projectId, appDataDir, timeoutMs = 12000) {
   return new Promise((resolve) => {
     const env = { ...process.env };
     if (projectId) env.ANTIGRAVITY_PROJECT_ID = projectId;
-    const { file, prefix } = resolveAgentApiCommand();
+    const { file, prefix, shell } = resolveAgentApiCommand(appDataDir);
     execFile(
       file,
       [...prefix, ...args],
-      { encoding: 'utf-8', env, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+      { encoding: 'utf-8', env, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, shell },
       (err, stdout, stderr) => {
         if (err) {
-          resolve({ error: err.message, stderr: stderr ? String(stderr) : undefined });
+          const errMsg = stderr ? `${err.message}: ${stderr}` : err.message;
+          resolve({ error: errMsg, stderr: stderr ? String(stderr) : undefined });
           return;
         }
         const trimmed = stdout ? String(stdout).trim() : '';
@@ -873,7 +991,8 @@ function execAgentApi(args, projectId, timeoutMs = 12000) {
           return;
         }
         try {
-          resolve(JSON.parse(trimmed));
+          const parsed = JSON.parse(trimmed);
+          resolve(parsed);
         } catch {
           resolve({ success: true, raw: trimmed });
         }
@@ -906,80 +1025,24 @@ function rewriteUiHtmlLinks(html, token, conversationId) {
   });
 }
 
-function buildHandoffTexts(entry, fullCheckpointRaw, focusTopic) {
-  const cleanSummary = fullCheckpointRaw
-    ? fullCheckpointRaw.replace(/^[\s\S]*?<summary>/i, '').replace(/<\/summary>[\s\S]*$/i, '').trim()
-    : '';
+function buildAgentHandoffRequest(entry, focusTopic) {
+  const focusDirective = focusTopic
+    ? `Ο χρήστης έδωσε την εξής οδηγία / εστίαση για το νέο conversation:\n"${focusTopic}"\nΠροσάρμοσε το handoff prompt ώστε να εστιάζει ΑΠΟΚΛΕΙΣΤΙΚΑ σε αυτό που ζήτησε ο χρήστης, συμπεριλαμβάνοντας όλο το σχετικό τεχνικό context, τις επιλογές και την τελευταία μας συζήτηση.`
+    : `Συνόψισε την τρέχουσα εργασία, τι ολοκληρώθηκε, την τελευταία μας τεχνική ανάλυση/συζήτηση και το αμέσως επόμενο βήμα.`;
 
-  const promptsAfterCompact = cleanSummary
-    ? (entry.promptsSinceLastCompact > 0
-        ? entry.prompts.slice(-Math.min(10, entry.promptsSinceLastCompact))
-        : [])
-    : entry.prompts.slice(-10);
-
-  const lines = [];
-  lines.push('# Context Handoff Summary');
-  lines.push('');
-  if (entry.workspacePath) {
-    lines.push(`- **Workspace**: \`${entry.workspacePath}\``);
-  }
-  lines.push(`- **Source Conversation**: \`${entry.id}\` (${entry.compactCount} compacts, ${entry.promptCount} prompts)`);
-  if (focusTopic) {
-    lines.push(`- **Requested Focus**: ${focusTopic}`);
-  }
-  lines.push('');
-
-  if (cleanSummary) {
-    lines.push('## Latest Checkpoint Summary');
-    lines.push('');
-    lines.push(cleanSummary);
-    lines.push('');
-  } else {
-    lines.push('## Conversation Overview (No Compactions Yet)');
-    lines.push('');
-    if (entry.firstPrompt) {
-      lines.push(`**Initial Goal**:\n${entry.firstPrompt}`);
-      lines.push('');
-    }
-    if (entry.lastModelResponse) {
-      lines.push(`**Latest Agent Output**:\n${entry.lastModelResponse}`);
-      lines.push('');
-    }
-  }
-
-  if (promptsAfterCompact.length > 0) {
-    lines.push(cleanSummary ? '## Prompts Since Last Compact' : '## Recent User Prompts');
-    lines.push('');
-    for (const p of promptsAfterCompact) {
-      lines.push(`### Prompt #${p.index}`);
-      lines.push(p.text);
-      lines.push('');
-    }
-  }
-
-  const summaryText = lines.join('\n').trim();
-
-  const focusInstruction = focusTopic
-    ? `\n\nΕστίασε ΑΠΟΚΛΕΙΣΤΙΚΑ στο εξής θέμα: **${focusTopic}** (αγνόησε δευτερεύοντα θέματα από το προηγούμενο chat).`
-    : '';
-
-  const promptForAgentHandoff =
-    `Θέλω να κάνουμε καθαρό handoff σε νέο conversation.${focusInstruction}\n\n` +
-    `Γράψε μου ένα ολοκληρωμένο, αυτοτελές handoff prompt (σε markdown code block) που να περιλαμβάνει:\n` +
-    `1. Το ακριβές τρέχον state και τα αρχεία που αλλάξαμε ή εξετάσαμε.\n` +
-    `2. Τις τεχνικές αποφάσεις και τους περιορισμούς που συμφωνήσαμε.\n` +
-    `3. Τα ακριβή επόμενα βήματα ώστε το νέο chat να συνεχίσει αμέσως χωρίς να χάσει context.`;
-
-  const promptForNewChat =
-    `Συνεχίζουμε από προηγούμενο conversation (\`${entry.id}\`).${focusInstruction}\n\n` +
-    `Παρακάτω είναι το summary και τα τελευταία prompts:\n\n` +
-    summaryText;
-
-  return {
-    summaryText,
-    promptForAgentHandoff,
-    promptForNewChat
-  };
+  return (
+    `[Context Health Smart Handoff]\n` +
+    `Φτιάξε τώρα ένα αυτοτελές (self-contained) handoff prompt για να συνεχίσουμε σε νέο conversation.\n\n` +
+    `${focusDirective}\n\n` +
+    `ΑΥΣΤΗΡΟΙ ΚΑΝΟΝΕΣ:\n` +
+    `1. ΜΗΝ καλέσεις ΚΑΝΕΝΑ απολύτως tool (όχι read_file, όχι run_command, όχι search). Έχεις ήδη όλο το context στη μνήμη σου. Απάντησε ΑΜΕΣΩΣ.\n` +
+    `2. Τύλιξε το τελικό handoff prompt ΑΚΡΙΒΩΣ μέσα σε tags <HANDOFF_PROMPT> και </HANDOFF_PROMPT>. Μόλις ολοκληρώσεις την απάντησή σου, το Context Health sidecar θα διαβάσει αυτόματα το περιεχόμενο μέσα στα tags και θα το φορτώσει στο πεδίο του plugin για review.\n` +
+    `3. Μέσα στο <HANDOFF_PROMPT>...</HANDOFF_PROMPT> συμπεριέλαβε:\n` +
+    `   - Στην πρώτη γραμμή την οδηγία: "Όλο το απαραίτητο context βρίσκεται παρακάτω. ΜΗΝ ψάξεις σε αρχεία transcript.jsonl προηγούμενων conversations."\n` +
+    `   - Το Workspace (${entry.workspacePath || 'current workspace'}) και τα βασικά αρχεία που αφορά.\n` +
+    `   - Συμπυκνωμένα τι έχει γίνει μέχρι τώρα και όλη την τελευταία μας τεχνική ανάλυση, τις επιλογές ή τα ανοιχτά ερωτήματα.\n` +
+    `   - ΜΗΝ βάλεις το παλιό conversationId UUID.`
+  );
 }
 
 function sendJson(res, status, data) {
@@ -1011,6 +1074,8 @@ class ContextHealthServer {
 
     this.convCache = new Map();
     this.metadataWorkspaceCache = new Map();
+    this.annotationTitleCache = new Map();
+    this.annotationsDir = path.join(this.appDataDir, 'annotations');
     this.gitCache = new GitRepoCache();
     this.stateVersion = 1;
     this.lastStateSignature = '';
@@ -1049,7 +1114,7 @@ class ContextHealthServer {
     if (isFile(this.indexCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.indexCachePath, 'utf-8'));
-        if (raw && raw.version === 2 && Array.isArray(raw.entries)) {
+        if (raw && raw.version === 7 && Array.isArray(raw.entries)) {
           for (const item of raw.entries) {
             if (item && typeof item.id === 'string') {
               rebuildSearchCorpus(item);
@@ -1069,7 +1134,7 @@ class ContextHealthServer {
     this.indexCacheDirty = false;
     try {
       const entries = [...this.convCache.values()];
-      writeJsonAtomic(this.indexCachePath, { version: 2, savedAt: Date.now(), entries });
+      writeJsonAtomic(this.indexCachePath, { version: 7, savedAt: Date.now(), entries });
     } catch {}
   }
 
@@ -1102,6 +1167,31 @@ class ContextHealthServer {
       } catch {}
     }
     return FALLBACK_PRELOAD_JS;
+  }
+
+  resolveConversationTitle(convId) {
+    const pbtxtPath = path.join(this.annotationsDir, `${convId}.pbtxt`);
+    let stat;
+    try {
+      stat = fs.statSync(pbtxtPath, { throwIfNoEntry: false });
+    } catch {
+      stat = null;
+    }
+    if (!stat || !stat.isFile()) {
+      return '';
+    }
+    const cached = this.annotationTitleCache.get(convId);
+    if (cached && cached.mtimeMs === stat.mtimeMs) {
+      return cached.title;
+    }
+    try {
+      const raw = fs.readFileSync(pbtxtPath, 'utf-8');
+      const title = extractTitleFromPbtxt(raw);
+      this.annotationTitleCache.set(convId, { mtimeMs: stat.mtimeMs, title });
+      return title;
+    } catch {
+      return cached ? cached.title : '';
+    }
   }
 
   refreshSingleEntry(convId) {
@@ -1165,19 +1255,21 @@ class ContextHealthServer {
         if (res.changed) anyTranscriptChanged = true;
         const entry = res.entry;
 
+        const resolvedTitle = this.resolveConversationTitle(convId);
+        if (resolvedTitle && entry.title !== resolvedTitle) {
+          entry.title = resolvedTitle;
+          rebuildSearchCorpus(entry);
+          anyTranscriptChanged = true;
+        }
+
         if (!entry.workspacePath && this.metadataWorkspaceCache.has(convId)) {
           entry.workspacePath = this.metadataWorkspaceCache.get(convId);
           anyTranscriptChanged = true;
         }
-        if (
-          convId === activeConvId &&
-          activeWorkspaceNorm &&
-          !entry.workspacePath &&
-          entry.lastActiveMs > 0 &&
-          Date.now() - entry.lastActiveMs < 60000
-        ) {
+        if (convId === activeConvId && activeWorkspaceNorm && !entry.workspacePath) {
           entry.workspacePath = activeWorkspaceNorm;
           this.metadataWorkspaceCache.set(convId, activeWorkspaceNorm);
+          this.saveMetadataCache();
           anyTranscriptChanged = true;
         }
 
@@ -1200,6 +1292,7 @@ class ContextHealthServer {
     }
 
     const subagentCounts = new Map();
+    const subagentTokens = new Map();
     for (const entry of this.convCache.values()) {
       if (parentLookup.has(entry.id)) {
         entry.isSubagent = true;
@@ -1211,11 +1304,19 @@ class ContextHealthServer {
           parentEntry.spawnedSubagentIds.push(entry.id);
         }
         subagentCounts.set(entry.parentConvId, (subagentCounts.get(entry.parentConvId) || 0) + 1);
+        if (entry.totalTokens > 0) {
+          subagentTokens.set(entry.parentConvId, (subagentTokens.get(entry.parentConvId) || 0) + entry.totalTokens);
+        }
       }
     }
 
     const allRecentCompactTokens = [];
-    const sortedEntries = [...this.convCache.values()].sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+    const sortedEntries = [...this.convCache.values()].sort((a, b) => {
+      const aUser = a.lastUserInputMs || a.lastActiveMs || 0;
+      const bUser = b.lastUserInputMs || b.lastActiveMs || 0;
+      if (bUser !== aUser) return bUser - aUser;
+      return (b.lastActiveMs || 0) - (a.lastActiveMs || 0);
+    });
     for (const entry of sortedEntries) {
       if (Array.isArray(entry.compactTriggerTokens) && entry.compactTriggerTokens.length > 0) {
         allRecentCompactTokens.push(...entry.compactTriggerTokens.slice(-5));
@@ -1234,11 +1335,12 @@ class ContextHealthServer {
     return {
       sortedEntries,
       subagentCounts,
+      subagentTokens,
       globalObservedCeiling
     };
   }
 
-  buildConversationCard(entry, subagentCounts, globalObservedCeiling) {
+  buildConversationCard(entry, subagentCounts, globalObservedCeiling, subagentTokens) {
     const verbatimPrompts = entry.compactCount > 0
       ? Math.min(10, entry.promptCount)
       : entry.promptCount;
@@ -1265,11 +1367,15 @@ class ContextHealthServer {
       isSubagent: !!entry.isSubagent,
       parentConvId: entry.parentConvId || null,
       subagentCount,
+      subagentTokens: subagentTokens ? (subagentTokens.get(entry.id) || 0) : 0,
       workspacePath: entry.workspacePath || '',
       workspaceKey: workspaceComparisonKey(entry.workspacePath || ''),
       workspaceName: getWorkspaceLabel(entry.workspacePath || ''),
       lastActiveIso: entry.lastActiveIso || '',
       lastActiveMs: entry.lastActiveMs || 0,
+      lastUserInputMs: entry.lastUserInputMs || entry.lastActiveMs || 0,
+      latestHandoffMs: entry.latestHandoffMs || 0,
+      latestHandoffPrompt: entry.latestHandoffPrompt || '',
       compactCount: entry.compactCount || 0,
       lastCompactMs: entry.lastCompactMs || 0,
       promptsSinceLastCompact: entry.promptsSinceLastCompact || 0,
@@ -1278,9 +1384,14 @@ class ContextHealthServer {
       verbatimPrompts,
       compactedPrompts,
       currentTokens,
+      totalInputTokens: entry.totalInputTokens || 0,
+      totalCacheReadTokens: entry.totalCacheReadTokens || 0,
+      totalOutputTokens: entry.totalOutputTokens || 0,
+      totalTokens: entry.totalTokens || 0,
       observedCeiling,
       ceilingExceeded,
       contextRatio,
+      title: entry.title || '',
       firstPrompt: entry.firstPrompt || '',
       lastPrompt: entry.lastPrompt || '',
       checkpointOverview: entry.checkpointOverview || '',
@@ -1307,14 +1418,31 @@ class ContextHealthServer {
       ''
     ).trim().toLowerCase();
 
-    const { sortedEntries, subagentCounts, globalObservedCeiling } = this.refreshIndex({
+    const { sortedEntries, subagentCounts, subagentTokens, globalObservedCeiling } = this.refreshIndex({
       activeConvId: hostConvId,
       workspaceUris
     });
 
+    const detectedActiveWorkspaceNorm = workspaceUris.length > 0
+      ? resolveCanonicalWorkspace(workspaceUris[0])
+      : (sortedEntries.find((e) => e.id === hostConvId)?.workspacePath || '');
+
+    if (query.force === '1') {
+      this.gitCache.repos.clear();
+    }
+
+    const activeWorkspaceKey = workspaceComparisonKey(detectedActiveWorkspaceNorm);
+
     const cards = sortedEntries.map((entry) =>
-      this.buildConversationCard(entry, subagentCounts, globalObservedCeiling)
+      this.buildConversationCard(entry, subagentCounts, globalObservedCeiling, subagentTokens)
     );
+
+    if (UUID_RE.test(hostConvId) && !cards.some((c) => c.id === hostConvId)) {
+      const placeholderEntry = createEmptyEntry(hostConvId);
+      placeholderEntry.workspacePath =
+        detectedActiveWorkspaceNorm || this.metadataWorkspaceCache.get(hostConvId) || '';
+      cards.unshift(this.buildConversationCard(placeholderEntry, subagentCounts, globalObservedCeiling, subagentTokens));
+    }
 
     const workspaceMap = new Map();
     for (const c of cards) {
@@ -1333,23 +1461,22 @@ class ContextHealthServer {
       }
     }
 
-    const detectedActiveWorkspaceNorm = workspaceUris.length > 0
-      ? resolveCanonicalWorkspace(workspaceUris[0])
-      : (cards.find((c) => c.id === hostConvId)?.workspacePath || '');
-
-    const activeWorkspaceKey = workspaceComparisonKey(detectedActiveWorkspaceNorm);
-
     const signature = JSON.stringify({
       hostConvId,
       activeWorkspaceKey,
       globalObservedCeiling,
       items: cards.map((c) => [
         c.id,
+        c.title,
         c.lastActiveMs,
+        c.lastUserInputMs,
+        c.latestHandoffMs,
         c.compactCount,
         c.pollution.id,
         c.promptCount,
         c.currentTokens,
+        c.totalTokens,
+        c.subagentTokens,
         c.workspaceKey,
         c.git.commitsBehind,
         c.subagentCount
@@ -1433,6 +1560,10 @@ class ContextHealthServer {
         workspacePath: entry.workspacePath,
         compactCount: entry.compactCount,
         promptCount: entry.promptCount,
+        totalInputTokens: entry.totalInputTokens || 0,
+        totalCacheReadTokens: entry.totalCacheReadTokens || 0,
+        totalOutputTokens: entry.totalOutputTokens || 0,
+        totalTokens: entry.totalTokens || 0,
         checkpointOverview: entry.checkpointOverview,
         prompts: [...entry.prompts].reverse(),
         missedCommits: drift.missedCommits,
@@ -1452,25 +1583,13 @@ class ContextHealthServer {
       return { status: 404, body: { error: 'Conversation not found' } };
     }
 
-    const fullTranscriptPath = path.join(
-      this.brainDir,
-      entry.id,
-      '.system_generated',
-      'logs',
-      'transcript_full.jsonl'
-    );
-    const fullCheckpointRaw = entry.compactCount > 0
-      ? readLastCheckpointFromFullTranscript(fullTranscriptPath, entry)
-      : '';
-
-    const handoff = buildHandoffTexts(entry, fullCheckpointRaw, focusTopic);
+    const promptForAgentHandoff = buildAgentHandoffRequest(entry, focusTopic);
     return {
       status: 200,
       body: {
         id: entry.id,
         compactCount: entry.compactCount,
-        hasCheckpoint: Boolean(fullCheckpointRaw),
-        ...handoff
+        promptForAgentHandoff
       }
     };
   }
@@ -1608,7 +1727,11 @@ class ContextHealthServer {
         args.push('--title', body.title);
       }
       args.push(convId, message);
-      const out = await execAgentApi(args, body.projectId);
+      const out = await execAgentApi(args, body.projectId, this.appDataDir);
+      if (out && out.error) {
+        sendJson(res, 502, out);
+        return;
+      }
       sendJson(res, 200, out);
       return;
     }
@@ -1625,7 +1748,11 @@ class ContextHealthServer {
         args.push('--model', body.model);
       }
       args.push(message);
-      const out = await execAgentApi(args, body.projectId);
+      const out = await execAgentApi(args, body.projectId, this.appDataDir);
+      if (out && out.error) {
+        sendJson(res, 502, out);
+        return;
+      }
       sendJson(res, 200, out);
       return;
     }
@@ -1637,7 +1764,7 @@ class ContextHealthServer {
         sendJson(res, 400, { error: 'Invalid conversationId' });
         return;
       }
-      const out = await execAgentApi(['get-conversation-metadata', convId], body.projectId);
+      const out = await execAgentApi(['get-conversation-metadata', convId], body.projectId, this.appDataDir);
       const uris =
         out?.response?.conversationMetadata?.metadata?.workspaceUris ??
         out?.conversationMetadata?.metadata?.workspaceUris ??

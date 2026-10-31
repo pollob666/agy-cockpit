@@ -4,6 +4,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const REPO_ROOT = __dirname;
 const GEMINI_CONFIG_DIR = process.env.ANTIGRAVITY_CONFIG_DIR
@@ -22,8 +23,17 @@ const HOOKS_JSON_FILE = path.join(GEMINI_CONFIG_DIR, 'hooks.json');
 
 function resolveNodeExecutable() {
   const execPath = process.execPath;
-  if (execPath && fs.existsSync(execPath)) {
+  if (execPath && /^node(\.exe)?$/i.test(path.basename(execPath)) && fs.existsSync(execPath)) {
     return execPath.replace(/\\/g, '/');
+  }
+  const existingManifest = path.join(SIDECAR_DEST_DIR, 'sidecar.json');
+  if (fs.existsSync(existingManifest)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(existingManifest, 'utf-8'));
+      if (parsed && typeof parsed.command === 'string' && parsed.command.trim()) {
+        return parsed.command.trim().replace(/\\/g, '/');
+      }
+    } catch {}
   }
   return 'node';
 }
@@ -37,6 +47,63 @@ function readExistingHooksJson() {
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
+  }
+}
+
+function restartRunningSidecarServer() {
+  const killedPids = new Set();
+  const geminiRoot = path.join(os.homedir(), '.gemini');
+  for (const app of ['antigravity', 'antigravity-ide', 'antigravity-cli']) {
+    const staleHookFiles = [
+      path.join(geminiRoot, app, 'sidecar_data', 'context-health', 'data', 'active_conversations.json'),
+      path.join(geminiRoot, app, 'sidecar_data', 'context-health', 'context-health', 'data', 'active_conversations.json')
+    ];
+    for (const staleFile of staleHookFiles) {
+      try {
+        if (fs.existsSync(staleFile)) fs.rmSync(staleFile, { force: true });
+      } catch {}
+    }
+
+    const candidates = [
+      path.join(geminiRoot, app, 'sidecar_data', 'context-health', 'context-health', 'data', 'server_info.json'),
+      path.join(geminiRoot, app, 'sidecar_data', 'context-health', 'data', 'server_info.json'),
+      path.join(geminiRoot, app, 'sidecar_data', 'context-health', 'server.json')
+    ];
+    for (const srvFile of candidates) {
+      if (fs.existsSync(srvFile)) {
+        try {
+          const info = JSON.parse(fs.readFileSync(srvFile, 'utf-8'));
+          const pid = Number(info && info.pid);
+          if (pid > 0 && pid !== process.pid && !killedPids.has(pid)) {
+            process.kill(pid, 'SIGTERM');
+            killedPids.add(pid);
+          }
+        } catch {}
+      }
+    }
+  }
+
+  if (process.platform === 'win32') {
+    try {
+      const psScript =
+        "Get-CimInstance Win32_Process -Filter \"Name = 'node.exe'\" | " +
+        "Where-Object { $_.CommandLine -match '\\bserver\\.cjs(\\s|$|\")' } | " +
+        "Select-Object -ExpandProperty ProcessId";
+      const out = execFileSync(
+        'powershell.exe',
+        ['-NoProfile', '-Command', psScript],
+        { encoding: 'utf-8', timeout: 5000 }
+      );
+      for (const line of String(out || '').split(/\r?\n/)) {
+        const pid = parseInt(line.trim(), 10);
+        if (pid > 0 && pid !== process.pid && !killedPids.has(pid)) {
+          try {
+            process.kill(pid, 'SIGTERM');
+            killedPids.add(pid);
+          } catch {}
+        }
+      }
+    } catch {}
   }
 }
 
@@ -82,6 +149,8 @@ function installAll() {
   };
 
   fs.writeFileSync(HOOKS_JSON_FILE, JSON.stringify(hooksConfig, null, 2) + '\n', 'utf-8');
+
+  restartRunningSidecarServer();
 
   console.log('[context-health] Installed successfully:');
   console.log('  Platform      :', `${process.platform} (${process.arch})`);
