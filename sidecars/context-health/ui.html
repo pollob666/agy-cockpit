@@ -1,0 +1,1277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Context Health</title>
+  <script src="/preload.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      font-size: 12px;
+      line-height: 1.45;
+      background: var(--background, #0a0a0a);
+      color: var(--foreground, #ededed);
+      padding: 12px;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, input {
+      font: inherit;
+      color: inherit;
+    }
+
+    .shell {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #10b981;
+    }
+
+    .dot-sm {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      display: inline-block;
+    }
+
+    .brand-title {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--foreground, #ededed);
+    }
+
+    .brand-ws {
+      font-size: 12px;
+      color: var(--muted-foreground, #888888);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .ghost-btn {
+      background: transparent;
+      color: var(--muted-foreground, #888888);
+      border: 1px solid transparent;
+      border-radius: 5px;
+      padding: 2px 7px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+    }
+
+    .ghost-btn:hover {
+      color: var(--foreground, #ededed);
+      border-color: var(--border, rgba(255, 255, 255, 0.09));
+      background: var(--secondary, rgba(255, 255, 255, 0.04));
+    }
+
+    .active-card {
+      background: var(--card, #141414);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.09));
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .status-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .tier-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-weight: 600;
+      font-size: 12px;
+    }
+
+    .tier-fresh { color: #34d399; }
+    .tier-warm { color: #38bdf8; }
+    .tier-heavy { color: #fbbf24; }
+    .tier-polluted { color: #f87171; }
+
+    .dot-fresh { background: #10b981; }
+    .dot-warm { background: #38bdf8; }
+    .dot-heavy { background: #f59e0b; }
+    .dot-polluted { background: #ef4444; }
+
+    .muted {
+      color: var(--muted-foreground, #888888);
+      font-size: 12px;
+    }
+
+    .drift-warn {
+      color: #fbbf24;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .meter-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .meter-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .meter-track {
+      width: 100%;
+      height: 5px;
+      background: var(--background, #0a0a0a);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .meter-fill {
+      height: 100%;
+      border-radius: 999px;
+      transition: width 0.2s ease;
+    }
+
+    .meter-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted-foreground, #888888);
+      flex-wrap: wrap;
+    }
+
+    .actions-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+      flex-wrap: wrap;
+    }
+
+    .actions-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .btn-solid {
+      background: var(--foreground, #ededed);
+      color: var(--background, #0a0a0a);
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.12s;
+    }
+
+    .btn-solid:hover {
+      opacity: 0.88;
+    }
+
+    .btn-outline {
+      background: var(--background, #0a0a0a);
+      color: var(--foreground, #ededed);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.12s, border-color 0.12s;
+    }
+
+    .btn-outline:hover {
+      background: var(--secondary, rgba(255, 255, 255, 0.06));
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .filter-section {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .search-input {
+      width: 100%;
+      background: var(--card, #141414);
+      color: var(--foreground, #ededed);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+      border-radius: 7px;
+      padding: 6px 10px;
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.12s;
+    }
+
+    .search-input::placeholder {
+      color: var(--muted-foreground, #777777);
+    }
+
+    .search-input:focus {
+      border-color: var(--muted-foreground, #888888);
+    }
+
+    .scope-tabs {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .scope-tab {
+      background: transparent;
+      color: var(--muted-foreground, #888888);
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: color 0.12s, background 0.12s, border-color 0.12s;
+    }
+
+    .scope-tab:hover {
+      color: var(--foreground, #ededed);
+    }
+
+    .scope-tab.active {
+      background: var(--secondary, rgba(255, 255, 255, 0.07));
+      color: var(--foreground, #ededed);
+      border-color: var(--border, rgba(255, 255, 255, 0.12));
+      font-weight: 500;
+    }
+
+    .list-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .list-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 2px;
+      font-size: 12px;
+      color: var(--muted-foreground, #888888);
+    }
+
+    .conv-row {
+      background: var(--card, #141414);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+      border-radius: 8px;
+      padding: 9px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: border-color 0.12s;
+    }
+
+    .conv-row:hover {
+      border-color: rgba(255, 255, 255, 0.18);
+    }
+
+    .conv-row-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      cursor: pointer;
+    }
+
+    .conv-title {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--foreground, #ededed);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .conv-row-bottom {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .conv-meta {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: var(--muted-foreground, #888888);
+    }
+
+    .conv-actions {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+
+    .drawer {
+      padding-top: 8px;
+      border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .handoff-input {
+      width: 100%;
+      background: var(--background, #0a0a0a);
+      color: var(--foreground, #ededed);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+      border-radius: 6px;
+      padding: 5px 9px;
+      font-size: 12px;
+      outline: none;
+    }
+
+    .handoff-input:focus {
+      border-color: var(--muted-foreground, #888888);
+    }
+
+    .drawer-subtitle {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted-foreground, #888888);
+    }
+
+    .commits-list, .prompts-scroll {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+
+    .commit-row {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      font-size: 12px;
+      background: var(--background, #0a0a0a);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+      border-radius: 5px;
+      padding: 4px 7px;
+    }
+
+    .commit-sha {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: #fbbf24;
+      flex-shrink: 0;
+    }
+
+    .commit-subj {
+      color: var(--foreground, #ededed);
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .prompt-item {
+      background: var(--background, #0a0a0a);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+      border-radius: 6px;
+      padding: 6px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .prompt-item-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: var(--muted-foreground, #888888);
+    }
+
+    .prompt-item-text {
+      font-size: 12px;
+      color: var(--foreground, #ededed);
+      white-space: pre-wrap;
+      word-break: break-word;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .prompt-item-text.expanded {
+      display: block;
+      -webkit-line-clamp: unset;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+
+    .expand-link {
+      align-self: flex-start;
+      background: none;
+      border: none;
+      color: var(--muted-foreground, #888888);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .expand-link:hover {
+      color: var(--foreground, #ededed);
+    }
+
+    .search-hits {
+      background: var(--background, #0a0a0a);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+      border-radius: 5px;
+      padding: 5px 7px;
+      font-size: 12px;
+      color: var(--muted-foreground, #888888);
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .empty-box {
+      padding: 16px 12px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--muted-foreground, #888888);
+      background: var(--card, #141414);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+      border-radius: 8px;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 12px;
+      right: 12px;
+      background: var(--foreground, #ededed);
+      color: var(--background, #0a0a0a);
+      font-weight: 500;
+      font-size: 12px;
+      padding: 6px 11px;
+      border-radius: 6px;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(6px);
+      transition: opacity 0.15s, transform 0.15s;
+      z-index: 9999;
+    }
+
+    .toast.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div class="brand">
+        <span class="dot" id="status-dot"></span>
+        <span class="brand-title">Context Health</span>
+        <span class="brand-ws" id="active-workspace-indicator"></span>
+      </div>
+      <button class="ghost-btn" id="btn-refresh" title="Refresh">Refresh</button>
+    </div>
+
+    <div id="pinned-container"></div>
+
+    <div class="filter-section">
+      <input
+        type="text"
+        id="search-input"
+        class="search-input"
+        placeholder="Filter conversations or prompts..."
+      />
+      <div class="scope-tabs" id="workspace-pills"></div>
+    </div>
+
+    <div class="list-section">
+      <div class="list-header">
+        <span id="list-header-title">Other conversations</span>
+        <span id="list-header-count"></span>
+      </div>
+      <div id="cards-container" style="display:flex;flex-direction:column;gap:6px;"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    (function() {
+      const state = {
+        version: 0,
+        uiMtimeMs: 0,
+        hostConvId: (window.sidecar && window.sidecar.conversationId) || '',
+        pinnedConvId: (window.sidecar && window.sidecar.conversationId) || '',
+        autoFollow: true,
+        workspaceUris: [],
+        selectedWorkspaceKey: '__auto__',
+        searchQuery: '',
+        lastFetchedQuery: '',
+        conversations: [],
+        workspaces: [],
+        activeWorkspaceKey: '',
+        activeWorkspaceName: '',
+        globalObservedCeiling: 0,
+        searchMatches: null,
+        expandedDetails: new Map(),
+        expandedPromptKeys: new Set(),
+        openHandoffId: null,
+        handoffFocusByConv: new Map()
+      };
+
+      const pinnedContainer = document.getElementById('pinned-container');
+      const cardsContainer = document.getElementById('cards-container');
+      const workspacePillsEl = document.getElementById('workspace-pills');
+      const searchInput = document.getElementById('search-input');
+      const activeWsIndicator = document.getElementById('active-workspace-indicator');
+      const listHeaderTitle = document.getElementById('list-header-title');
+      const listHeaderCount = document.getElementById('list-header-count');
+      const statusDotEl = document.getElementById('status-dot');
+      const btnRefresh = document.getElementById('btn-refresh');
+      const toastEl = document.getElementById('toast');
+
+      function showToast(msg) {
+        toastEl.textContent = msg;
+        toastEl.classList.add('visible');
+        clearTimeout(showToast._timer);
+        showToast._timer = setTimeout(() => {
+          toastEl.classList.remove('visible');
+        }, 2000);
+      }
+
+      function escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function formatRelativeTime(isoOrMs) {
+        if (!isoOrMs) return '';
+        const ms = typeof isoOrMs === 'number' ? isoOrMs : Date.parse(isoOrMs);
+        if (!Number.isFinite(ms) || ms <= 0) return '';
+        const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+        if (diffSec < 45) return 'just now';
+        const mins = Math.floor(diffSec / 60);
+        if (mins < 60) return mins + 'm ago';
+        const hours = Math.floor(mins / 60);
+        if (hours < 24) return hours + 'h ago';
+        const days = Math.floor(hours / 24);
+        if (days < 30) return days + 'd ago';
+        return Math.floor(days / 30) + 'mo ago';
+      }
+
+      function formatTokens(tok) {
+        if (!tok || tok <= 0) return '0';
+        if (tok >= 1000000) return (tok / 1000000).toFixed(2) + 'M';
+        if (tok >= 1000) return (tok / 1000).toFixed(1) + 'k';
+        return String(tok);
+      }
+
+      async function copyTextToClipboard(text) {
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+            return true;
+          }
+        } catch {}
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        let ok = false;
+        try {
+          ok = document.execCommand('copy');
+        } catch {}
+        document.body.removeChild(ta);
+        return ok;
+      }
+
+      function apiFetch(urlPath, options = {}) {
+        if (window.sidecar && typeof window.sidecar.fetch === 'function') {
+          return window.sidecar.fetch(urlPath, options);
+        }
+        return fetch(urlPath, options);
+      }
+
+      function openConversationInHost(convId) {
+        state.pinnedConvId = convId;
+        if (window.sidecar && window.sidecar.ui && typeof window.sidecar.ui.toggleConversation === 'function') {
+          window.sidecar.ui.toggleConversation(convId);
+        }
+        renderAll();
+      }
+
+      function resolveEffectiveWorkspaceScope() {
+        if (state.selectedWorkspaceKey !== '__auto__') {
+          return state.selectedWorkspaceKey;
+        }
+        if (state.activeWorkspaceKey) {
+          return state.activeWorkspaceKey;
+        }
+        const pinned = state.conversations.find((c) => c.id === state.pinnedConvId);
+        if (pinned && pinned.workspaceKey) {
+          return pinned.workspaceKey;
+        }
+        return '__all__';
+      }
+
+      function getCardTier(card) {
+        const compacts = Number(card && card.compactCount) || 0;
+        const compactedPrompts = Number(card && card.compactedPrompts) || 0;
+        if (compacts <= 2 && compactedPrompts === 0) {
+          return { id: 'fresh', label: 'Fresh', text: 'tier-fresh', dot: 'dot-fresh', color: '#10b981' };
+        }
+        if (compacts <= 5) {
+          return { id: 'warm', label: 'Warm', text: 'tier-warm', dot: 'dot-warm', color: '#38bdf8' };
+        }
+        if (compacts <= 9) {
+          return { id: 'heavy', label: 'Heavy', text: 'tier-heavy', dot: 'dot-heavy', color: '#f59e0b' };
+        }
+        return { id: 'polluted', label: 'Polluted', text: 'tier-polluted', dot: 'dot-polluted', color: '#ef4444' };
+      }
+
+      function renderDetailsDrawer(card) {
+        const details = state.expandedDetails.get(card.id);
+        if (!details) return '';
+        if (details.loading) {
+          return '<div class="drawer"><span class="muted">Loading history...</span></div>';
+        }
+
+        let html = '<div class="drawer">';
+
+        if (Array.isArray(details.missedCommits) && details.missedCommits.length > 0) {
+          html += '<div class="drawer-subtitle">Missed commits (' + details.commitsBehind + ' behind HEAD)</div>';
+          html += '<div class="commits-list">';
+          for (const c of details.missedCommits) {
+            html +=
+              '<div class="commit-row">' +
+                '<span class="commit-sha">' + escapeHtml(c.short) + '</span>' +
+                '<span class="commit-subj">' + escapeHtml(c.subject) + '</span>' +
+                '<span class="muted">' + escapeHtml(formatRelativeTime(c.tsMs || c.iso)) + '</span>' +
+              '</div>';
+          }
+          html += '</div>';
+        }
+
+        if (details.checkpointOverview) {
+          const ovKey = card.id + ':overview';
+          const ovExpanded = state.expandedPromptKeys.has(ovKey);
+          html +=
+            '<div class="drawer-subtitle">Latest compact overview</div>' +
+            '<div class="prompt-item">' +
+              '<div class="prompt-item-text' + (ovExpanded ? ' expanded' : '') + '">' +
+                escapeHtml(details.checkpointOverview) +
+              '</div>' +
+              '<button class="expand-link" data-action="toggle-clamp" data-expand-key="' + escapeHtml(ovKey) + '">' +
+                (ovExpanded ? 'Show less' : 'Show more') +
+              '</button>' +
+            '</div>';
+        }
+
+        const prompts = Array.isArray(details.prompts) ? details.prompts : [];
+        html += '<div class="drawer-subtitle">User prompts (' + prompts.length + ')</div>';
+        if (prompts.length === 0) {
+          html += '<div class="muted">No user prompts recorded.</div>';
+        } else {
+          html += '<div class="prompts-scroll">';
+          for (const p of prompts) {
+            const needsExpand = (p.text || '').length > 160 || (p.text || '').split('\n').length > 3;
+            const pKey = card.id + ':' + p.index;
+            const pExpanded = state.expandedPromptKeys.has(pKey);
+            html +=
+              '<div class="prompt-item">' +
+                '<div class="prompt-item-head">' +
+                  '<span>#' + p.index + '</span>' +
+                  '<span>' + escapeHtml(formatRelativeTime(p.createdAt)) + '</span>' +
+                '</div>' +
+                '<div class="prompt-item-text' + (pExpanded ? ' expanded' : '') + '">' + escapeHtml(p.text) + '</div>' +
+                (needsExpand
+                  ? '<button class="expand-link" data-action="toggle-clamp" data-expand-key="' + escapeHtml(pKey) + '">' +
+                      (pExpanded ? 'Show less' : 'Show more') +
+                    '</button>'
+                  : '') +
+              '</div>';
+          }
+          html += '</div>';
+        }
+
+        html += '</div>';
+        return html;
+      }
+
+      function renderHandoffDrawer(card) {
+        if (state.openHandoffId !== card.id) return '';
+        const savedFocus = state.handoffFocusByConv.get(card.id) || '';
+        return (
+          '<div class="drawer">' +
+            '<input ' +
+              'type="text" ' +
+              'class="handoff-input" ' +
+              'data-focus-conv="' + escapeHtml(card.id) + '" ' +
+              'placeholder="Optional focus (e.g. only the parser rework)" ' +
+              'value="' + escapeHtml(savedFocus) + '" ' +
+            '/>' +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap;">' +
+              '<button class="btn-solid" data-action="handoff-new-chat" data-id="' + escapeHtml(card.id) + '">' +
+                'Start New Chat' +
+              '</button>' +
+              '<button class="btn-outline" data-action="handoff-ask-agent" data-id="' + escapeHtml(card.id) + '">' +
+                'Ask Agent to Draft' +
+              '</button>' +
+            '</div>' +
+          '</div>'
+        );
+      }
+
+      function renderActiveCard(card) {
+        const tier = getCardTier(card);
+        statusDotEl.className = 'dot ' + tier.dot;
+
+        let gitStatusHtml = '';
+        if (card.git && card.git.hasGit) {
+          gitStatusHtml = card.git.commitsBehind > 0
+            ? '<span class="drift-warn">' + card.git.commitsBehind + ' commit' + (card.git.commitsBehind === 1 ? '' : 's') + ' behind HEAD</span>'
+            : '<span class="muted">HEAD in sync</span>';
+        }
+
+        const cur = formatTokens(card.currentTokens);
+        const ceil = card.observedCeiling > 0 ? '~' + formatTokens(card.observedCeiling) : null;
+        let fillPct = 0;
+        let barColor = tier.color;
+        let rightLabel = '';
+
+        if (card.ceilingExceeded || !card.observedCeiling) {
+          fillPct = card.currentTokens > 0 ? 60 : 0;
+          rightLabel = card.ceilingExceeded
+            ? cur + ' tok (observing new ceiling)'
+            : cur + ' tok';
+        } else {
+          fillPct = Math.round((card.contextRatio || 0) * 100);
+          if (fillPct >= 88) barColor = '#ef4444';
+          else if (fillPct >= 70) barColor = '#f59e0b';
+          rightLabel = cur + ' / ' + ceil + ' (' + fillPct + '%)';
+        }
+
+        const lastCompactLabel = card.compactCount > 0 && card.lastCompactMs
+          ? 'Last compact ' + formatRelativeTime(card.lastCompactMs) + ' (' + card.promptsSinceLastCompact + ' prompt' + (card.promptsSinceLastCompact === 1 ? '' : 's') + ' ago)'
+          : 'No compactions yet';
+
+        const retentionLabel = card.compactedPrompts > 0
+          ? card.verbatimPrompts + ' verbatim · ' + card.compactedPrompts + ' compacted'
+          : 'All ' + card.promptCount + ' verbatim';
+
+        const isDetailsOpen = state.expandedDetails.has(card.id);
+
+        return (
+          '<div class="active-card" data-conv-id="' + escapeHtml(card.id) + '">' +
+            '<div class="status-row">' +
+              '<div class="status-left">' +
+                '<span class="tier-label ' + tier.text + '">' +
+                  '<span class="dot-sm ' + tier.dot + '"></span>' +
+                  escapeHtml(tier.label) +
+                '</span>' +
+                '<span class="muted">· ' + card.compactCount + ' compact' + (card.compactCount === 1 ? '' : 's') + '</span>' +
+                '<span class="muted">· ' + card.promptCount + ' prompt' + (card.promptCount === 1 ? '' : 's') + '</span>' +
+              '</div>' +
+              gitStatusHtml +
+            '</div>' +
+
+            '<div class="meter-group">' +
+              '<div class="meter-head">' +
+                '<span class="muted">Context window</span>' +
+                '<span class="mono">' + escapeHtml(rightLabel) + '</span>' +
+              '</div>' +
+              '<div class="meter-track">' +
+                '<div class="meter-fill" style="width:' + fillPct + '%;background:' + barColor + ';"></div>' +
+              '</div>' +
+              '<div class="meter-foot">' +
+                '<span>' + escapeHtml(lastCompactLabel) + '</span>' +
+                '<span>' + escapeHtml(retentionLabel) + '</span>' +
+              '</div>' +
+            '</div>' +
+
+            '<div class="actions-bar">' +
+              '<div class="actions-left">' +
+                '<button class="btn-solid" data-action="toggle-handoff" data-id="' + escapeHtml(card.id) + '">' +
+                  'Smart Handoff' +
+                '</button>' +
+                '<button class="btn-outline" data-action="copy-summary" data-id="' + escapeHtml(card.id) + '">' +
+                  'Copy Summary' +
+                '</button>' +
+              '</div>' +
+              '<button class="ghost-btn" data-action="toggle-details" data-id="' + escapeHtml(card.id) + '">' +
+                (isDetailsOpen ? 'Hide History' : 'History &amp; Commits') +
+              '</button>' +
+            '</div>' +
+
+            renderHandoffDrawer(card) +
+            renderDetailsDrawer(card) +
+          '</div>'
+        );
+      }
+
+      function renderCompactRow(card, showWorkspaceName) {
+        const tier = getCardTier(card);
+        const titleText = card.lastPrompt || card.firstPrompt || ('Conversation ' + card.id.slice(0, 8));
+        const compactedNote = card.compactedPrompts > 0
+          ? ' (' + card.compactedPrompts + ' compacted)'
+          : '';
+
+        let gitNoteHtml = '';
+        if (card.git && card.git.hasGit) {
+          gitNoteHtml = card.git.commitsBehind > 0
+            ? '<span class="drift-warn">· ' + card.git.commitsBehind + ' behind</span>'
+            : '<span>· HEAD</span>';
+        }
+
+        const wsNoteHtml = showWorkspaceName && card.workspaceName
+          ? '<span>· ' + escapeHtml(card.workspaceName) + '</span>'
+          : '';
+
+        const searchHit = state.searchMatches && state.searchMatches[card.id];
+        let searchHitsHtml = '';
+        if (searchHit && Array.isArray(searchHit.matchingPrompts) && searchHit.matchingPrompts.length > 0) {
+          searchHitsHtml = '<div class="search-hits">';
+          for (const mp of searchHit.matchingPrompts) {
+            searchHitsHtml += '<div><strong>#' + mp.index + ':</strong> ' + escapeHtml(mp.text.slice(0, 160)) + '</div>';
+          }
+          searchHitsHtml += '</div>';
+        }
+
+        return (
+          '<div class="conv-row" data-conv-id="' + escapeHtml(card.id) + '">' +
+            '<div class="conv-row-top" data-action="open-chat" data-id="' + escapeHtml(card.id) + '" title="Switch to this conversation">' +
+              '<span class="conv-title">' + escapeHtml(titleText) + '</span>' +
+              '<span class="muted">' + escapeHtml(formatRelativeTime(card.lastActiveMs)) + '</span>' +
+            '</div>' +
+            '<div class="conv-row-bottom">' +
+              '<div class="conv-meta">' +
+                '<span class="tier-label ' + tier.text + '">' +
+                  '<span class="dot-sm ' + tier.dot + '"></span>' +
+                  escapeHtml(tier.label) + ' · ' + card.compactCount +
+                '</span>' +
+                '<span>· ' + card.promptCount + ' prompts' + escapeHtml(compactedNote) + '</span>' +
+                gitNoteHtml +
+                wsNoteHtml +
+              '</div>' +
+              '<div class="conv-actions">' +
+                '<button class="ghost-btn" data-action="copy-summary" data-id="' + escapeHtml(card.id) + '">Copy</button>' +
+                '<button class="ghost-btn" data-action="toggle-handoff" data-id="' + escapeHtml(card.id) + '">Handoff</button>' +
+                '<button class="ghost-btn" data-action="toggle-details" data-id="' + escapeHtml(card.id) + '">History</button>' +
+              '</div>' +
+            '</div>' +
+            searchHitsHtml +
+            renderHandoffDrawer(card) +
+            renderDetailsDrawer(card) +
+          '</div>'
+        );
+      }
+
+      function renderWorkspacePills(effectiveScope, pinnedId) {
+        const otherMain = state.conversations.filter((c) => !c.isSubagent && c.id !== pinnedId);
+        const countsByWs = new Map();
+        for (const c of otherMain) {
+          const k = c.workspaceKey || '__unscoped__';
+          countsByWs.set(k, (countsByWs.get(k) || 0) + 1);
+        }
+
+        let html = '';
+        for (const ws of state.workspaces) {
+          const otherCount = countsByWs.get(ws.key) || 0;
+          if (otherCount === 0 && effectiveScope !== ws.key) continue;
+          const isActive = effectiveScope === ws.key;
+          html +=
+            '<button class="scope-tab ' + (isActive ? 'active' : '') + '" data-ws="' + escapeHtml(ws.key) + '" title="' + escapeHtml(ws.path) + '">' +
+              escapeHtml(ws.name) + ' (' + otherCount + ')' +
+            '</button>';
+        }
+
+        html +=
+          '<button class="scope-tab ' + (effectiveScope === '__all__' ? 'active' : '') + '" data-ws="__all__">' +
+            'All (' + otherMain.length + ')' +
+          '</button>';
+
+        workspacePillsEl.innerHTML = html;
+      }
+
+      function renderAll() {
+        const activeEl = document.activeElement;
+        const focusedConv = activeEl && activeEl.classList && activeEl.classList.contains('handoff-input')
+          ? activeEl.getAttribute('data-focus-conv')
+          : null;
+        const selStart = focusedConv ? activeEl.selectionStart : null;
+        const selEnd = focusedConv ? activeEl.selectionEnd : null;
+        const isInPinned = Boolean(focusedConv && pinnedContainer.contains(activeEl));
+
+        const mainChats = state.conversations.filter((c) => !c.isSubagent);
+        const wsMainChats = state.activeWorkspaceKey
+          ? mainChats.filter((c) => c.workspaceKey === state.activeWorkspaceKey)
+          : [];
+        if (state.autoFollow && mainChats.length > 0) {
+          const pool = wsMainChats.length > 0 ? wsMainChats : mainChats;
+          const hostMatch = state.hostConvId && pool.find((c) => c.id === state.hostConvId);
+          state.pinnedConvId = (hostMatch && hostMatch.lastActiveMs >= pool[0].lastActiveMs - 5000)
+            ? hostMatch.id
+            : pool[0].id;
+        }
+
+        const pinnedCard =
+          state.conversations.find((c) => c.id === state.pinnedConvId) ||
+          wsMainChats[0] ||
+          mainChats[0] ||
+          state.conversations[0];
+
+        const pinnedId = pinnedCard ? pinnedCard.id : '';
+
+        if (pinnedCard) {
+          pinnedContainer.innerHTML = renderActiveCard(pinnedCard);
+          activeWsIndicator.textContent = pinnedCard.workspaceName ? '· ' + pinnedCard.workspaceName : '';
+        } else {
+          pinnedContainer.innerHTML = '<div class="empty-box">No active conversation detected yet.</div>';
+          activeWsIndicator.textContent = '';
+        }
+
+        const effectiveScope = resolveEffectiveWorkspaceScope();
+        renderWorkspacePills(effectiveScope, pinnedId);
+
+        const q = state.searchQuery.trim().toLowerCase();
+        const filtered = state.conversations.filter((c) => {
+          if (c.isSubagent) return false;
+          if (c.id === pinnedId) return false;
+          if (effectiveScope !== '__all__') {
+            const cKey = c.workspaceKey || '__unscoped__';
+            if (cKey !== effectiveScope) return false;
+          }
+          if (q) {
+            if (!state.searchMatches || !state.searchMatches[c.id]) return false;
+          }
+          return true;
+        });
+
+        const wsObj = state.workspaces.find((w) => w.key === effectiveScope);
+        const scopeTitle = effectiveScope === '__all__'
+          ? 'Other conversations (All)'
+          : 'Other conversations in ' + ((wsObj && wsObj.name) || 'workspace');
+        listHeaderTitle.textContent = scopeTitle;
+        listHeaderCount.textContent = filtered.length + ' chat' + (filtered.length === 1 ? '' : 's');
+
+        const showWsName = effectiveScope === '__all__';
+        if (filtered.length === 0) {
+          cardsContainer.innerHTML =
+            '<div class="empty-box">' +
+              (effectiveScope !== '__all__'
+                ? 'No other conversations in this workspace. Select "All" to browse other projects.'
+                : 'No other conversations match the current filter.') +
+            '</div>';
+        } else {
+          cardsContainer.innerHTML = filtered.map((c) => renderCompactRow(c, showWsName)).join('');
+        }
+
+        if (focusedConv) {
+          const targetContainer = isInPinned ? pinnedContainer : cardsContainer;
+          const selector = '.handoff-input[data-focus-conv="' + focusedConv.replace(/"/g, '\\"') + '"]';
+          const restored = targetContainer.querySelector(selector) || document.querySelector(selector);
+          if (restored) {
+            restored.focus();
+            if (typeof selStart === 'number' && typeof selEnd === 'number') {
+              try {
+                restored.setSelectionRange(selStart, selEnd);
+              } catch {}
+            }
+          }
+        }
+      }
+
+      async function fetchStatus(force = false) {
+        try {
+          const currentQuery = state.searchQuery.trim();
+          const queryChanged = currentQuery !== state.lastFetchedQuery;
+          const params = new URLSearchParams();
+          if (!force && !queryChanged && state.version > 0) {
+            params.set('sinceVersion', String(state.version));
+          }
+          if (force) params.set('force', '1');
+          if (state.hostConvId) params.set('activeConvId', state.hostConvId);
+          if (state.workspaceUris.length > 0) {
+            params.set('workspaceUris', JSON.stringify(state.workspaceUris));
+          }
+          if (currentQuery) {
+            params.set('q', currentQuery);
+          }
+
+          const res = await apiFetch('/api/status?' + params.toString());
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data.uiMtimeMs) {
+            if (state.uiMtimeMs > 0 && data.uiMtimeMs !== state.uiMtimeMs) {
+              window.location.reload();
+              return;
+            }
+            state.uiMtimeMs = data.uiMtimeMs;
+          }
+          if (data.unchanged && !force && !queryChanged) return;
+
+          state.version = data.version || state.version;
+          state.lastFetchedQuery = currentQuery;
+          if (data.hostConversationId && !state.hostConvId) {
+            state.hostConvId = data.hostConversationId;
+          }
+          state.activeWorkspaceKey = data.activeWorkspaceKey || '';
+          state.activeWorkspaceName = data.activeWorkspaceName || '';
+          state.globalObservedCeiling = data.globalObservedCeiling || 0;
+          state.workspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
+          state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
+          state.searchMatches = data.searchMatches || null;
+
+          renderAll();
+        } catch (err) {
+          console.error('[ContextHealth] status poll failed:', err);
+        }
+      }
+
+      async function toggleDetails(convId) {
+        if (state.expandedDetails.has(convId)) {
+          state.expandedDetails.delete(convId);
+          renderAll();
+          return;
+        }
+        state.expandedDetails.set(convId, { loading: true });
+        renderAll();
+        try {
+          const res = await apiFetch('/api/conversation-details?id=' + encodeURIComponent(convId));
+          if (!res.ok) throw new Error('Failed to load details');
+          const data = await res.json();
+          state.expandedDetails.set(convId, data);
+        } catch {
+          state.expandedDetails.delete(convId);
+          showToast('Failed to load conversation details');
+        }
+        renderAll();
+      }
+
+      async function fetchHandoffData(convId) {
+        const focus = (state.handoffFocusByConv.get(convId) || '').trim();
+        const qs = new URLSearchParams({ id: convId });
+        if (focus) qs.set('focus', focus);
+        const res = await apiFetch('/api/handoff-summary?' + qs.toString());
+        if (!res.ok) throw new Error('Failed to build handoff summary');
+        const data = await res.json();
+        return { data, focus };
+      }
+
+      async function handleInstantCopy(convId) {
+        try {
+          const { data } = await fetchHandoffData(convId);
+          await copyTextToClipboard(data.summaryText || '');
+          showToast('Copied handoff summary');
+        } catch (err) {
+          showToast('Error copying summary: ' + err.message);
+        }
+      }
+
+      async function handleSmartHandoffAskAgent(convId) {
+        try {
+          const { data } = await fetchHandoffData(convId);
+          if (window.sidecar && window.sidecar.agent) {
+            await window.sidecar.agent.sendMessage(data.promptForAgentHandoff, convId);
+            openConversationInHost(convId);
+            showToast('Sent handoff request to agent');
+          }
+        } catch (err) {
+          showToast('Error messaging agent: ' + err.message);
+        }
+      }
+
+      async function handleSmartHandoffNewChat(convId) {
+        try {
+          const { data, focus } = await fetchHandoffData(convId);
+          if (window.sidecar && window.sidecar.agent) {
+            const title = focus ? 'Handoff: ' + focus.slice(0, 40) : 'Context Handoff';
+            await window.sidecar.agent.startConversation(data.promptForNewChat, title);
+            showToast('Started new conversation');
+          }
+        } catch (err) {
+          showToast('Error starting new chat: ' + err.message);
+        }
+      }
+
+      document.addEventListener('click', (e) => {
+        const wsBtn = e.target.closest('[data-ws]');
+        if (wsBtn) {
+          state.selectedWorkspaceKey = wsBtn.getAttribute('data-ws');
+          renderAll();
+          return;
+        }
+
+        const actionBtn = e.target.closest('[data-action]');
+        if (!actionBtn) return;
+        const action = actionBtn.getAttribute('data-action');
+        const convId = actionBtn.getAttribute('data-id');
+
+        if (action === 'open-chat' && convId) {
+          state.autoFollow = false;
+          openConversationInHost(convId);
+        } else if (action === 'toggle-details' && convId) {
+          toggleDetails(convId);
+        } else if (action === 'toggle-handoff' && convId) {
+          state.openHandoffId = state.openHandoffId === convId ? null : convId;
+          renderAll();
+        } else if (action === 'copy-summary' && convId) {
+          handleInstantCopy(convId);
+        } else if (action === 'handoff-ask-agent' && convId) {
+          handleSmartHandoffAskAgent(convId);
+        } else if (action === 'handoff-new-chat' && convId) {
+          handleSmartHandoffNewChat(convId);
+        } else if (action === 'toggle-clamp') {
+          const el = actionBtn.previousElementSibling;
+          if (el) {
+            const expanded = el.classList.toggle('expanded');
+            actionBtn.textContent = expanded ? 'Show less' : 'Show more';
+            const expandKey = actionBtn.getAttribute('data-expand-key');
+            if (expandKey) {
+              if (expanded) state.expandedPromptKeys.add(expandKey);
+              else state.expandedPromptKeys.delete(expandKey);
+            }
+          }
+        }
+      });
+
+      document.addEventListener('input', (e) => {
+        if (e.target && e.target.hasAttribute('data-focus-conv')) {
+          const convId = e.target.getAttribute('data-focus-conv');
+          state.handoffFocusByConv.set(convId, e.target.value);
+        }
+      });
+
+      let searchTimer = null;
+      searchInput.addEventListener('input', () => {
+        state.searchQuery = searchInput.value;
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {
+          fetchStatus(true);
+        }, 120);
+      });
+
+      btnRefresh.addEventListener('click', async () => {
+        state.autoFollow = true;
+        state.selectedWorkspaceKey = '__auto__';
+        if (window.sidecar && typeof window.sidecar.getWorkspaceUris === 'function') {
+          try {
+            const uris = await window.sidecar.getWorkspaceUris();
+            if (Array.isArray(uris) && uris.length > 0) {
+              state.workspaceUris = uris;
+            }
+          } catch {}
+        }
+        await fetchStatus(true);
+        showToast('Refreshed');
+      });
+
+      if (window.sidecar) {
+        if (typeof window.sidecar.getWorkspaceUris === 'function') {
+          window.sidecar.getWorkspaceUris().then((uris) => {
+            if (Array.isArray(uris) && uris.length > 0) {
+              state.workspaceUris = uris;
+              state.autoFollow = true;
+              fetchStatus(true);
+            }
+          }).catch(() => {});
+        }
+        if (typeof window.sidecar.onWorkspaceChange === 'function') {
+          window.sidecar.onWorkspaceChange((uris) => {
+            state.workspaceUris = Array.isArray(uris) ? uris : [];
+            state.autoFollow = true;
+            fetchStatus(true);
+          });
+        }
+      }
+
+      fetchStatus(true);
+      setInterval(() => {
+        fetchStatus(false);
+      }, 3000);
+    })();
+  </script>
+</body>
+</html>

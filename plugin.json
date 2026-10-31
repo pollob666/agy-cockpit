@@ -1,0 +1,6 @@
+{
+  "name": "context-health",
+  "displayName": "Context Health",
+  "version": "1.0.0",
+  "description": "Monitor conversation context pollution, compaction history, and git repository drift, with smart handoff to fresh chats."
+}
