@@ -46,10 +46,12 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 - Detects the Git repository root associated with each conversation and compares the conversation's last activity timestamp against `HEAD` (excluding commits created inside that conversation).
 - Displays `HEAD in sync` or `N commits behind HEAD`, and lists the missed commit hashes, subjects, and timestamps inside the expandable `History & Commits` drawer.
 
-### 4. Workspace Scoping, Search & Project Archiving
+### 4. Workspace Scoping, Live Activity Indicators, Search & Archiving
 - **Pinned Active Chat Card**: Pins the active conversation of the current workspace at the top with a live context meter and token breakdown. Clicking any conversation row in the list switches to that chat in Antigravity and pins it at the top.
-- **Project-Scoped Filter Tabs**: Syncs with `~/.gemini/config/projects/` and `window.sidecar.getWorkspaceUris()` (`onWorkspaceChange`) to scope the conversation list to the active project, with tabs to switch across projects or browse `All`.
-- **Project Archiving / Unarchiving**: Right-click any project tab to **Archive Project**, hiding that project and its conversations from both the Antigravity sidebar and Context Health without deleting any data. Click the `Archived (N)` tab anytime to restore archived projects.
+- **Project-Scoped Filter Tabs & Live Thinking / Unread Indicators**: Syncs with `~/.gemini/config/projects/` and `window.sidecar.getWorkspaceUris()` (`onWorkspaceChange`) to scope the conversation list to the active project, with tabs to switch across projects or browse `All`. Both project tabs and `Other conversations` cards display animated thinking dots (`•••`) while an agent is streaming or executing tools in the background, transitioning to an unread blue dot (`●`) until that conversation is opened.
+- **Quick New Conversation (`+ New`)**: Spawn a new conversation directly from the filter bar inside the current/selected project workspace or as a general (`No Project`) chat without leaving the panel.
+- **Turn Previews (`You:` / `AI:`)**: Compact cards in `Other conversations` preview both your latest prompt (`You:`) and the model's latest response (`AI:`) on separate lines.
+- **Project & Conversation Archiving / Deletion**: Right-click any project tab to **Archive Project**, or use the bottom-right gear menu (`⚙`) on any conversation card to **Archive** it (restorable from `Archived (N)`) or permanently **Delete** it (`DeleteCascadeTrajectory` with confirmation).
 - **Instant Full-Text Search & Prompt History**: Filters conversations in real time across titles, `USER_INPUT` prompts, and `Task Overview` checkpoint summaries. Expanding `History & Commits` shows missed Git commits, the latest compact overview, and user prompts clamped to 3 lines (`Show more` / `Show less`).
 
 ### 5. Two-Step Smart Handoff & Dynamic Model Selector

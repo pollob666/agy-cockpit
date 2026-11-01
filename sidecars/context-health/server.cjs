@@ -89,6 +89,7 @@ const FALLBACK_PRELOAD_JS = `(function() {
           if (opts.conversationId) payload.conversationId = opts.conversationId;
           if (opts.projectId) payload.projectId = opts.projectId;
           if (opts.workspacePath) payload.workspacePath = opts.workspacePath;
+          if (opts.general) payload.general = true;
         }
         const res = await secureFetch('/_sidecar/new-conversation', {
           method: 'POST',
@@ -321,6 +322,22 @@ function cleanUserPrompt(rawContent) {
   return text.replace(/\r\n/g, '\n').trim();
 }
 
+function cleanModelPreview(rawContent) {
+  if (!rawContent || typeof rawContent !== 'string') return '';
+  let text = rawContent
+    .replace(/<HANDOFF_PROMPT>[\s\S]*?<\/HANDOFF_PROMPT>/gi, '')
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+    .replace(/```[\s\S]*?```/g, ' [code] ')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/<\/?[A-Za-z_][A-Za-z0-9_-]*>/g, ' ')
+    .replace(/^#+\s+/gm, '')
+    .replace(/^\s*[-*>]\s+/gm, '')
+    .replace(/[*_`~]+/g, '');
+  text = text.replace(/\s+/g, ' ').trim();
+  return text.slice(0, 300);
+}
+
 function classifyPollution(compactCount, compactedPrompts = 0) {
   if (compactCount <= 2 && compactedPrompts === 0) {
     return { id: 'fresh', label: 'Fresh', color: '#10b981' };
@@ -395,7 +412,9 @@ function createEmptyEntry(convId) {
     lastActiveMs: 0,
     lastUserInputMs: 0,
     lastViewMs: 0,
+    lastSeenMs: 0,
     archived: false,
+    markedAsUnread: false,
     isSubagent: false,
     parentConvId: '',
     spawnedSubagentIds: [],
@@ -416,6 +435,12 @@ function createEmptyEntry(convId) {
     title: '',
     firstPrompt: '',
     lastPrompt: '',
+    lastModelResponse: '',
+    lastModelResponseMs: 0,
+    lastStepType: '',
+    lastStepStatus: '',
+    lastStepHasToolCalls: false,
+    lastStepMs: 0,
     latestHandoffPrompt: '',
     latestHandoffMs: 0,
     handoffPendingMs: 0,
@@ -440,6 +465,17 @@ function createEmptyEntry(convId) {
   return entry;
 }
 
+function isEntryThinking(entry, nowMs = Date.now()) {
+  if (!entry || entry.isSubagent) return false;
+  const lastAct = Math.max(entry.mtimeMs || 0, entry.lastStepMs || 0, entry.lastActiveMs || 0);
+  if (!lastAct || nowMs - lastAct > 180000) return false;
+  if (entry.awaitingHandoffResponse) return true;
+  if (entry.lastStepStatus === 'RUNNING') return true;
+  if (entry.lastStepType === 'USER_INPUT' || entry.lastStepType === 'GENERIC') return true;
+  if (entry.lastStepType === 'PLANNER_RESPONSE' && entry.lastStepHasToolCalls) return true;
+  return false;
+}
+
 function extractMentionedCommits(entry, text) {
   let commitMatch;
   GIT_COMMIT_OUT_RE.lastIndex = 0;
@@ -460,12 +496,37 @@ function processTranscriptLine(entry, line, isFirstLine) {
   const hasSystem = line.includes('"type":"SYSTEM_MESSAGE"');
   const hasGeneric =
     !hasUser && !hasPlanner && !hasCheckpoint && !hasSystem && line.includes('"type":"GENERIC"');
+  const hasError =
+    !hasUser && !hasPlanner && !hasCheckpoint && !hasSystem && !hasGeneric && line.includes('"type":"ERROR_MESSAGE"');
   const hasSubagentCreation = hasGeneric && line.includes('Created the following subagent');
 
   if (hasGeneric && !hasSubagentCreation) {
+    entry.lastStepType = 'GENERIC';
+    entry.lastStepStatus = line.includes('"status":"RUNNING"')
+      ? 'RUNNING'
+      : (line.includes('"status":"ERROR"') ? 'ERROR' : 'DONE');
+    entry.lastStepHasToolCalls = false;
+    const tsMatch = /"created_at"\s*:\s*"([^"]+)"/.exec(line);
+    if (tsMatch) {
+      const tsMs = Date.parse(tsMatch[1]);
+      if (tsMs > 0) {
+        entry.lastStepMs = Math.max(entry.lastStepMs || 0, tsMs);
+        if (tsMs >= (entry.lastActiveMs || 0)) {
+          entry.lastActiveIso = tsMatch[1];
+          entry.lastActiveMs = tsMs;
+        }
+      }
+    }
     if (line.includes('[')) {
       extractMentionedCommits(entry, line);
     }
+    return false;
+  }
+
+  if (hasError) {
+    entry.lastStepType = 'ERROR_MESSAGE';
+    entry.lastStepStatus = 'ERROR';
+    entry.lastStepHasToolCalls = false;
     return false;
   }
 
@@ -512,6 +573,12 @@ function processTranscriptLine(entry, line, isFirstLine) {
       if (!entry.isSubagent && obj.source !== 'SYSTEM' && createdMs >= (entry.lastUserInputMs || 0)) {
         entry.lastUserInputMs = createdMs;
       }
+      entry.lastStepType = 'USER_INPUT';
+      entry.lastStepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
+      entry.lastStepHasToolCalls = false;
+      if (createdMs > 0) {
+        entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
+      }
       entry.awaitingHandoffResponse = false;
       entry.needsFullHandoffRead = false;
       entry.handoffTargetStepIndex = -1;
@@ -537,6 +604,16 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.lastActiveIso = createdAt;
       entry.lastActiveMs = createdMs;
     }
+    const hasTools = Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0;
+    const stepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
+    const wasAwaitingHandoff = Boolean(entry.awaitingHandoffResponse);
+    entry.lastStepType = 'PLANNER_RESPONSE';
+    entry.lastStepStatus = stepStatus;
+    entry.lastStepHasToolCalls = hasTools;
+    if (createdMs > 0) {
+      entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
+    }
+
     const inTok = typeof obj.input_tokens === 'number' && obj.input_tokens > 0 ? obj.input_tokens : 0;
     const cacheTok = typeof obj.cache_read_tokens === 'number' && obj.cache_read_tokens > 0 ? obj.cache_read_tokens : 0;
     const outTok = typeof obj.output_tokens === 'number' && obj.output_tokens > 0 ? obj.output_tokens : 0;
@@ -556,12 +633,14 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.totalOutputTokens = (entry.totalOutputTokens || 0) + outTok;
       entry.totalTokens = entry.totalInputTokens + entry.totalCacheReadTokens + entry.totalOutputTokens;
     }
+    let isHandoffStep = false;
     if (content && content.trim()) {
       const trimmedContent = content.trim();
       const isTruncatedContent =
         Array.isArray(obj.truncated_fields) && obj.truncated_fields.includes('content');
       const handoffMatch = /<HANDOFF_PROMPT>\s*([\s\S]*?)\s*<\/HANDOFF_PROMPT>/i.exec(trimmedContent);
       if (handoffMatch && handoffMatch[1].trim() && !isTruncatedContent) {
+        isHandoffStep = true;
         entry.latestHandoffPrompt = handoffMatch[1].trim();
         entry.latestHandoffMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
         entry.awaitingHandoffResponse = false;
@@ -572,6 +651,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
         (/<HANDOFF_PROMPT>/i.test(trimmedContent) ||
           (entry.awaitingHandoffResponse && (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)))
       ) {
+        isHandoffStep = true;
         entry.needsFullHandoffRead = true;
         entry.handoffTargetStepIndex = typeof obj.step_index === 'number' ? obj.step_index : -1;
         entry.handoffPendingMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
@@ -580,11 +660,30 @@ function processTranscriptLine(entry, line, isFirstLine) {
         entry.awaitingHandoffResponse &&
         (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)
       ) {
+        isHandoffStep = true;
         entry.latestHandoffPrompt = trimmedContent;
         entry.latestHandoffMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
         entry.awaitingHandoffResponse = false;
         entry.needsFullHandoffRead = false;
         entry.handoffTargetStepIndex = -1;
+      } else if (!wasAwaitingHandoff) {
+        const preview = cleanModelPreview(trimmedContent);
+        if (preview) {
+          entry.lastModelResponse = preview;
+        }
+      }
+    }
+
+    if (
+      !isHandoffStep &&
+      !wasAwaitingHandoff &&
+      !hasTools &&
+      stepStatus !== 'RUNNING' &&
+      (entry.promptCount > 0 || entry.lastModelResponse)
+    ) {
+      const respTs = createdMs || entry.lastActiveMs || 0;
+      if (respTs > 0) {
+        entry.lastModelResponseMs = Math.max(entry.lastModelResponseMs || 0, respTs);
       }
     }
 
@@ -722,7 +821,9 @@ function extractTitleFromPbtxt(raw) {
 }
 
 function extractAnnotationFromPbtxt(raw) {
-  if (!raw || typeof raw !== 'string') return { title: '', lastViewMs: 0, archived: false };
+  if (!raw || typeof raw !== 'string') {
+    return { title: '', lastViewMs: 0, archived: false, markedAsUnread: false };
+  }
   const title = extractTitleFromPbtxt(raw);
   const viewMatch = /\blast_user_view_time\s*:?\s*\{\s*seconds\s*:\s*(\d+)(?:\s+nanos\s*:\s*(\d+))?\s*\}/.exec(raw);
   let lastViewMs = 0;
@@ -734,7 +835,8 @@ function extractAnnotationFromPbtxt(raw) {
     }
   }
   const archived = /\barchived\s*:\s*true\b/i.test(raw);
-  return { title, lastViewMs, archived };
+  const markedAsUnread = /\bmarked_as_unread\s*:\s*true\b/i.test(raw);
+  return { title, lastViewMs, archived, markedAsUnread };
 }
 
 function rebuildSearchCorpus(entry) {
@@ -923,6 +1025,7 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
     entry.workspacePath = existingEntry.workspacePath || '';
     entry.lastViewMs = existingEntry.lastViewMs || 0;
     entry.lastUserInputMs = existingEntry.lastUserInputMs || 0;
+    entry.lastSeenMs = existingEntry.lastSeenMs || 0;
   }
   const startOffset = canIncremental ? entry.parsedBytes : 0;
   const bytesToRead = stat.size - startOffset;
@@ -992,11 +1095,19 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
   entry.size = stat.size;
   entry.mtimeMs = stat.mtimeMs;
   if (
+    entry.lastStepType === 'USER_INPUT' &&
     entry.lastUserInputMs > 0 &&
     stat.mtimeMs > entry.lastUserInputMs &&
     stat.mtimeMs - entry.lastUserInputMs < 1000
   ) {
     entry.lastUserInputMs = Math.floor(stat.mtimeMs);
+  }
+  if (
+    entry.lastStepType === 'PLANNER_RESPONSE' &&
+    entry.lastModelResponse &&
+    stat.mtimeMs > (entry.lastModelResponseMs || 0)
+  ) {
+    entry.lastModelResponseMs = Math.floor(stat.mtimeMs);
   }
   if (!entry.lastActiveMs) {
     entry.lastActiveMs = stat.mtimeMs;
@@ -1301,10 +1412,14 @@ function resolveAgentApiCommand(appDataDir) {
   return { file: 'agentapi', prefix: [], shell: false };
 }
 
-function execAgentApi(args, projectId, appDataDir, workspacePath = '', timeoutMs = 12000) {
+function execAgentApi(args, projectId, appDataDir, workspacePath = '', timeoutMs = 12000, clearProjectEnv = false) {
   return new Promise((resolve) => {
     const env = { ...process.env };
-    if (projectId) env.ANTIGRAVITY_PROJECT_ID = projectId;
+    if (clearProjectEnv) {
+      delete env.ANTIGRAVITY_PROJECT_ID;
+    } else if (projectId) {
+      env.ANTIGRAVITY_PROJECT_ID = projectId;
+    }
     const cwd = workspacePath && isDirectory(workspacePath) ? workspacePath : os.homedir();
     const { file, prefix, shell } = resolveAgentApiCommand(appDataDir);
     execFile(
@@ -1586,6 +1701,7 @@ class ContextHealthServer {
       '';
 
     this.convCache = new Map();
+    this.deletedConvIds = new Set();
     this.metadataWorkspaceCache = new Map();
     this.annotationTitleCache = new Map();
     this.annotationsDir = path.join(this.appDataDir, 'annotations');
@@ -1614,6 +1730,7 @@ class ContextHealthServer {
     this.modelResolveInFlight = new Set();
     this.modelResolveCooldown = new Map();
     this.modelsCatalogRev = 1;
+    this.initialBootScanDone = false;
 
     this.indexCachePath = path.join(this.dataDir, 'index_cache.json');
     this.metadataCachePath = path.join(this.dataDir, 'metadata_cache.json');
@@ -1634,7 +1751,9 @@ class ContextHealthServer {
         const raw = JSON.parse(fs.readFileSync(this.metadataCachePath, 'utf-8'));
         if (raw && typeof raw === 'object') {
           for (const [k, v] of Object.entries(raw)) {
-            if (typeof v === 'string' && v) {
+            if (v === '__general__') {
+              this.metadataWorkspaceCache.set(k, '__general__');
+            } else if (typeof v === 'string' && v) {
               this.metadataWorkspaceCache.set(k, resolveCanonicalWorkspace(v));
             } else if (v && typeof v === 'object' && typeof v.workspacePath === 'string' && v.workspacePath) {
               this.metadataWorkspaceCache.set(k, resolveCanonicalWorkspace(v.workspacePath));
@@ -1647,16 +1766,27 @@ class ContextHealthServer {
     if (isFile(this.indexCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.indexCachePath, 'utf-8'));
-        if (raw && raw.version === 12 && Array.isArray(raw.entries)) {
+        if (raw && raw.version === 13 && Array.isArray(raw.entries)) {
           for (const item of raw.entries) {
             if (item && typeof item.id === 'string') {
               item.lastUserInputMs = item.lastUserInputMs || 0;
+              item.lastSeenMs = item.lastSeenMs || 0;
+              item.markedAsUnread = Boolean(item.markedAsUnread);
+              item.lastModelResponse = item.lastModelResponse || '';
+              item.lastModelResponseMs = item.lastModelResponseMs || 0;
+              item.lastStepType = item.lastStepType || '';
+              item.lastStepStatus = item.lastStepStatus || '';
+              item.lastStepHasToolCalls = Boolean(item.lastStepHasToolCalls);
+              item.lastStepMs = item.lastStepMs || 0;
               item.modelEnum = item.modelEnum || '';
               item.modelLabel = item.modelLabel || '';
               item.modelResolvedMtimeMs = item.modelResolvedMtimeMs || 0;
               rebuildSearchCorpus(item);
               this.convCache.set(item.id, item);
             }
+          }
+          if (this.convCache.size > 0) {
+            this.initialBootScanDone = true;
           }
         }
       } catch {}
@@ -1671,7 +1801,7 @@ class ContextHealthServer {
     this.indexCacheDirty = false;
     try {
       const entries = [...this.convCache.values()];
-      writeJsonAtomic(this.indexCachePath, { version: 12, savedAt: Date.now(), entries });
+      writeJsonAtomic(this.indexCachePath, { version: 13, savedAt: Date.now(), entries });
     } catch {}
   }
 
@@ -1721,7 +1851,14 @@ class ContextHealthServer {
       stat = null;
     }
     if (!stat || !stat.isFile()) {
-      const emptyItem = { mtimeMs: 0, title: '', lastViewMs: 0, archived: false, checkedAtMs: now };
+      const emptyItem = {
+        mtimeMs: 0,
+        title: '',
+        lastViewMs: 0,
+        archived: false,
+        markedAsUnread: false,
+        checkedAtMs: now
+      };
       this.annotationTitleCache.set(convId, emptyItem);
       return emptyItem;
     }
@@ -1729,19 +1866,36 @@ class ContextHealthServer {
       cached &&
       cached.mtimeMs === stat.mtimeMs &&
       typeof cached.lastViewMs === 'number' &&
-      typeof cached.archived === 'boolean'
+      typeof cached.archived === 'boolean' &&
+      typeof cached.markedAsUnread === 'boolean'
     ) {
       cached.checkedAtMs = now;
       return cached;
     }
     try {
       const raw = fs.readFileSync(pbtxtPath, 'utf-8');
-      const { title, lastViewMs, archived } = extractAnnotationFromPbtxt(raw);
-      const item = { mtimeMs: stat.mtimeMs, title, lastViewMs, archived, checkedAtMs: now };
+      const { title, lastViewMs, archived, markedAsUnread } = extractAnnotationFromPbtxt(raw);
+      const item = {
+        mtimeMs: stat.mtimeMs,
+        title,
+        lastViewMs,
+        archived,
+        markedAsUnread: Boolean(markedAsUnread),
+        checkedAtMs: now
+      };
       this.annotationTitleCache.set(convId, item);
       return item;
     } catch {
-      return cached || { mtimeMs: 0, title: '', lastViewMs: 0, archived: false, checkedAtMs: now };
+      return (
+        cached || {
+          mtimeMs: 0,
+          title: '',
+          lastViewMs: 0,
+          archived: false,
+          markedAsUnread: false,
+          checkedAtMs: now
+        }
+      );
     }
   }
 
@@ -1763,15 +1917,22 @@ class ContextHealthServer {
         entry.archived = nextArchived;
         changed = true;
       }
-    }
-    if (!entry.workspacePath && this.metadataWorkspaceCache.has(convId)) {
-      const cachedWs = this.metadataWorkspaceCache.get(convId);
-      if (typeof cachedWs === 'string' && cachedWs) {
-        entry.workspacePath = cachedWs;
+      const nextUnreadFlag = Boolean(
+        annot.markedAsUnread && (annot.mtimeMs || 0) > (entry.lastSeenMs || 0)
+      );
+      if (Boolean(entry.markedAsUnread) !== nextUnreadFlag) {
+        entry.markedAsUnread = nextUnreadFlag;
         changed = true;
       }
     }
+    const cachedWs = this.metadataWorkspaceCache.get(convId);
+    const isExplicitGeneral = cachedWs === '__general__';
+    if (!entry.workspacePath && typeof cachedWs === 'string' && cachedWs && !isExplicitGeneral) {
+      entry.workspacePath = cachedWs;
+      changed = true;
+    }
     if (
+      !isExplicitGeneral &&
       convId === activeConvId &&
       activeWorkspaceNorm &&
       !entry.workspacePath &&
@@ -1785,6 +1946,185 @@ class ContextHealthServer {
       changed = true;
     }
     return changed;
+  }
+
+  markConversationSeen(convId, bumpViewTime = false) {
+    const cleanId = (convId || '').trim().toLowerCase();
+    if (!UUID_RE.test(cleanId)) return false;
+    const entry = this.convCache.get(cleanId);
+    if (!entry) return false;
+    let changed = false;
+    if (bumpViewTime) {
+      const nowMs = Date.now();
+      if (nowMs > (entry.lastViewMs || 0)) {
+        entry.lastViewMs = nowMs;
+        changed = true;
+      }
+    }
+    const annot = this.annotationTitleCache.get(cleanId);
+    const targetMs = Math.max(
+      entry.lastSeenMs || 0,
+      entry.lastViewMs || 0,
+      entry.lastUserInputMs || 0,
+      entry.lastModelResponseMs || 0,
+      annot && annot.mtimeMs ? Math.ceil(annot.mtimeMs) : 0
+    );
+    if (targetMs > (entry.lastSeenMs || 0)) {
+      entry.lastSeenMs = targetMs;
+      changed = true;
+    }
+    if (entry.markedAsUnread) {
+      entry.markedAsUnread = false;
+      changed = true;
+    }
+    if (changed) {
+      this.transcriptRev += 1;
+      this.cachedCardsState = null;
+      this.scheduleSaveIndexCache();
+    }
+    return changed;
+  }
+
+  async setConversationArchived(convId, archived) {
+    const cleanId = (convId || '').trim().toLowerCase();
+    if (!UUID_RE.test(cleanId)) {
+      return { status: 400, body: { error: 'Invalid conversation id' } };
+    }
+    const nextArchived = Boolean(archived);
+    const pbtxtPath = path.join(this.annotationsDir, `${cleanId}.pbtxt`);
+    let existingRaw = '';
+    try {
+      if (isFile(pbtxtPath)) {
+        existingRaw = fs.readFileSync(pbtxtPath, 'utf-8');
+      }
+    } catch {}
+    const parsedAnnot = existingRaw ? extractAnnotationFromPbtxt(existingRaw) : { title: '', lastViewMs: 0 };
+    const entry = this.convCache.get(cleanId);
+    const effectiveTitle = parsedAnnot.title || (entry && entry.title) || '';
+    const lastViewIso = parsedAnnot.lastViewMs > 0
+      ? new Date(parsedAnnot.lastViewMs).toISOString()
+      : new Date().toISOString();
+
+    try {
+      if (nextArchived) {
+        await callLanguageServerRpc(
+          'UpdateConversationAnnotations',
+          {
+            cascadeId: cleanId,
+            annotations: {
+              archived: true,
+              archivalStatusTimestamp: new Date().toISOString()
+            },
+            mergeAnnotations: true
+          },
+          4000
+        );
+      } else {
+        await callLanguageServerRpc(
+          'UpdateConversationAnnotations',
+          {
+            cascadeId: cleanId,
+            annotations: {
+              ...(effectiveTitle ? { title: effectiveTitle } : {}),
+              lastUserViewTime: lastViewIso,
+              archived: false
+            },
+            mergeAnnotations: false
+          },
+          4000
+        );
+      }
+    } catch {}
+
+    try {
+      let postRpcRaw = existingRaw;
+      if (isFile(pbtxtPath)) {
+        postRpcRaw = fs.readFileSync(pbtxtPath, 'utf-8');
+      }
+      const postRpcAnnot = postRpcRaw ? extractAnnotationFromPbtxt(postRpcRaw) : null;
+      if (!postRpcAnnot || Boolean(postRpcAnnot.archived) !== nextArchived) {
+        fs.mkdirSync(this.annotationsDir, { recursive: true });
+        let updatedRaw = (postRpcRaw || '').replace(/^\s*archived\s*:\s*(?:true|false)\s*$/gim, '').trim();
+        if (nextArchived) {
+          updatedRaw = (updatedRaw ? updatedRaw + '\n' : '') + 'archived: true\n';
+        } else if (updatedRaw) {
+          updatedRaw = updatedRaw + '\n';
+        }
+        if (updatedRaw || isFile(pbtxtPath)) {
+          fs.writeFileSync(pbtxtPath, updatedRaw, 'utf-8');
+        }
+      }
+    } catch {}
+
+    this.annotationTitleCache.delete(cleanId);
+    if (entry) {
+      entry.archived = nextArchived;
+    }
+    this.transcriptRev += 1;
+    this.cachedIndexSummary = null;
+    this.cachedCardsState = null;
+    this.scheduleSaveIndexCache();
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        conversationId: cleanId,
+        archived: nextArchived
+      }
+    };
+  }
+
+  async deleteConversation(convId) {
+    const cleanId = (convId || '').trim().toLowerCase();
+    if (!UUID_RE.test(cleanId)) {
+      return { status: 400, body: { error: 'Invalid conversation id' } };
+    }
+    let rpcResult = null;
+    try {
+      rpcResult = await callLanguageServerRpc(
+        'DeleteCascadeTrajectory',
+        { cascadeId: cleanId },
+        6000
+      );
+    } catch (err) {
+      rpcResult = { error: err instanceof Error ? err.message : String(err) };
+    }
+
+    const targets = [
+      path.join(this.brainDir, cleanId),
+      path.join(this.appDataDir, 'conversations', `${cleanId}.pb`),
+      path.join(this.annotationsDir, `${cleanId}.pbtxt`)
+    ];
+    for (const target of targets) {
+      try {
+        fs.rmSync(target, { recursive: true, force: true });
+      } catch {}
+    }
+
+    this.convCache.delete(cleanId);
+    this.deletedConvIds.add(cleanId);
+    if (this.metadataWorkspaceCache.delete(cleanId)) {
+      this.saveMetadataCache();
+    }
+    this.annotationTitleCache.delete(cleanId);
+    if (this.metadataWorkspaceCache.delete(cleanId)) {
+      this.saveMetadataCache();
+    }
+    this.lastFullScanMs = 0;
+    this.lastBrainDirMtimeMs = 0;
+    this.transcriptRev += 1;
+    this.cachedIndexSummary = null;
+    this.cachedCardsState = null;
+    this.scheduleSaveIndexCache();
+
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        conversationId: cleanId,
+        rpcOk: Boolean(!rpcResult || !rpcResult.error)
+      }
+    };
   }
 
   refreshProjectsRegistry(force = false) {
@@ -2039,6 +2379,7 @@ class ContextHealthServer {
 
         const activeWsKey = workspaceComparisonKey(activeWorkspaceNorm);
         const seenIds = new Set();
+        const isFirstBootScan = !this.initialBootScanDone;
         for (const d of dirents) {
           if (!d.isDirectory() || d.name.startsWith('.')) continue;
           const convId = d.name.toLowerCase();
@@ -2053,7 +2394,18 @@ class ContextHealthServer {
           if (this.refreshEntryById(convId, activeConvId, activeWorkspaceNorm, force || convId === activeConvId || inActiveWs)) {
             anyTranscriptChanged = true;
           }
+          if (isFirstBootScan) {
+            const loaded = this.convCache.get(convId);
+            if (loaded && !loaded.lastSeenMs) {
+              loaded.lastSeenMs = Math.max(
+                loaded.lastViewMs || 0,
+                loaded.lastUserInputMs || 0,
+                loaded.lastModelResponseMs || 0
+              );
+            }
+          }
         }
+        this.initialBootScanDone = true;
 
         for (const cachedId of this.convCache.keys()) {
           if (!seenIds.has(cachedId)) {
@@ -2074,6 +2426,7 @@ class ContextHealthServer {
           const isHot =
             mainChecked < 8 ||
             now - (entry.lastActiveMs || 0) < 15 * 60 * 1000 ||
+            isEntryThinking(entry, now) ||
             entry.awaitingHandoffResponse ||
             entry.needsFullHandoffRead;
           if (isHot) {
@@ -2376,6 +2729,18 @@ class ContextHealthServer {
       ? matchedProj.name
       : getWorkspaceLabel(effectiveWsPath);
 
+    const isThinking = isEntryThinking(entry);
+    const seenBaselineMs = Math.max(
+      entry.lastSeenMs || 0,
+      entry.lastViewMs || 0,
+      entry.lastUserInputMs || 0
+    );
+    const unread = Boolean(
+      !isThinking &&
+      (((entry.lastModelResponseMs || 0) > 0 && (entry.lastModelResponseMs || 0) > seenBaselineMs) ||
+        entry.markedAsUnread)
+    );
+
     return {
       id: entry.id,
       isSubagent: !!entry.isSubagent,
@@ -2388,6 +2753,7 @@ class ContextHealthServer {
       lastActiveMs: entry.lastActiveMs || 0,
       lastUserInputMs: entry.lastUserInputMs || 0,
       lastViewMs: entry.lastViewMs || 0,
+      lastSeenMs: entry.lastSeenMs || 0,
       latestHandoffMs: entry.latestHandoffMs || 0,
       latestHandoffPrompt: entry.latestHandoffPrompt || '',
       compactCount: entry.compactCount || 0,
@@ -2408,6 +2774,10 @@ class ContextHealthServer {
       title: entry.title || '',
       firstPrompt: entry.firstPrompt || '',
       lastPrompt: entry.lastPrompt || '',
+      lastModelResponse: entry.lastModelResponse || '',
+      lastModelResponseMs: entry.lastModelResponseMs || 0,
+      isThinking,
+      unread,
       modelEnum: entry.modelEnum || '',
       modelLabel: entry.modelLabel || this.lookupModelLabel(entry.modelEnum) || '',
       git: {
@@ -2447,6 +2817,14 @@ class ContextHealthServer {
       force: isForce
     });
 
+    const viewedConvId = (query.viewedConvId || '').trim().toLowerCase();
+    if (UUID_RE.test(viewedConvId)) {
+      const viewedEntry = this.convCache.get(viewedConvId);
+      if (viewedEntry && !isEntryThinking(viewedEntry)) {
+        this.markConversationSeen(viewedConvId);
+      }
+    }
+
     const detectedActiveWorkspaceNorm = workspaceUris.length > 0
       ? resolveCanonicalWorkspace(workspaceUris[0])
       : (sortedEntries.find((e) => e.id === hostConvId)?.workspacePath || '');
@@ -2458,28 +2836,59 @@ class ContextHealthServer {
 
     this.gitCache.checkKnownRepos(isForce);
 
+    const checkNowMs = Date.now();
+    if (this.cachedCardsState && Array.isArray(this.cachedCardsState.cards)) {
+      for (let i = 0; i < this.cachedCardsState.cards.length; i++) {
+        const c = this.cachedCardsState.cards[i];
+        const e = this.cachedCardsState.visibleEntries[i];
+        if (c && e && Boolean(c.isThinking) !== isEntryThinking(e, checkNowMs)) {
+          this.cachedCardsState = null;
+          break;
+        }
+      }
+    }
+
     let visibleEntries;
     let cards;
     let workspaces;
     let archivedProjects;
+    let archivedConversations;
     if (
       !isForce &&
       this.cachedCardsState &&
       this.cachedCardsState.transcriptRev === this.transcriptRev &&
       this.cachedCardsState.projectsRev === this.projectsRev &&
       this.cachedCardsState.gitRev === this.gitCache.revision &&
-      this.cachedCardsState.modelsCatalogRev === this.modelsCatalogRev
+      this.cachedCardsState.modelsCatalogRev === this.modelsCatalogRev &&
+      this.cachedCardsState.activeWorkspaceKey === activeWorkspaceKey
     ) {
       visibleEntries = this.cachedCardsState.visibleEntries;
       cards = this.cachedCardsState.cards;
       workspaces = this.cachedCardsState.workspaces;
       archivedProjects = this.cachedCardsState.archivedProjects;
+      archivedConversations = this.cachedCardsState.archivedConversations || [];
     } else {
       const archivedConvCounts = new Map();
       const hiddenMainItems = [];
+      archivedConversations = [];
       visibleEntries = sortedEntries.filter((e) => {
         if (e.isSubagent) return false;
         if (e.archived) {
+          const matchedProj = this.matchProjectForWorkspace(e.workspacePath || '');
+          const effectiveWsPath = matchedProj
+            ? (matchedProj.primaryPath || e.workspacePath || '')
+            : (e.workspacePath || '');
+          const effectiveWsName = matchedProj
+            ? matchedProj.name
+            : getWorkspaceLabel(effectiveWsPath);
+          archivedConversations.push({
+            id: e.id,
+            title: e.title || '',
+            firstPrompt: e.firstPrompt || '',
+            lastPrompt: e.lastPrompt || '',
+            workspaceName: effectiveWsName,
+            lastActiveMs: e.lastActiveMs || 0
+          });
           hiddenMainItems.push([e.id, e.lastActiveMs, e.latestHandoffMs, e.currentTokens, e.totalTokens, e.promptCount, e.compactCount]);
           return false;
         }
@@ -2527,6 +2936,19 @@ class ContextHealthServer {
           });
         }
       }
+      if (matchedActiveProj && !matchedActiveProj.archived) {
+        const activeKey = matchedActiveProj.primaryKey || matchedActiveProj.id;
+        if (activeKey && !workspaceMap.has(activeKey)) {
+          workspaceMap.set(activeKey, {
+            key: activeKey,
+            projectId: matchedActiveProj.id,
+            path: matchedActiveProj.primaryPath || detectedActiveWorkspaceNorm || '',
+            name: matchedActiveProj.name,
+            count: 0,
+            lastActiveMs: Date.now()
+          });
+        }
+      }
       workspaces = [...workspaceMap.values()].sort((a, b) => {
         if (a.key === '__unscoped__') return 1;
         if (b.key === '__unscoped__') return -1;
@@ -2551,7 +2973,9 @@ class ContextHealthServer {
         globalObservedCeiling,
         projectsRev: this.projectsRev,
         modelsCatalogRev: this.modelsCatalogRev,
+        activeWorkspaceKey,
         archivedIds: archivedProjects.map((p) => [p.id, p.count]),
+        archivedConvIds: archivedConversations.map((c) => [c.id, c.title, c.lastActiveMs]),
         hiddenMainItems,
         items: cards.map((c) => [
           c.id,
@@ -2559,6 +2983,7 @@ class ContextHealthServer {
           c.lastActiveMs,
           c.lastUserInputMs,
           c.lastViewMs,
+          c.lastSeenMs,
           c.latestHandoffMs,
           c.compactCount,
           c.pollution.id,
@@ -2570,6 +2995,11 @@ class ContextHealthServer {
           c.projectId,
           c.modelEnum,
           c.modelLabel,
+          c.lastPrompt,
+          c.lastModelResponse,
+          c.lastModelResponseMs,
+          c.isThinking,
+          c.unread,
           c.git.commitsBehind
         ])
       });
@@ -2584,10 +3014,12 @@ class ContextHealthServer {
         projectsRev: this.projectsRev,
         gitRev: this.gitCache.revision,
         modelsCatalogRev: this.modelsCatalogRev,
+        activeWorkspaceKey,
         visibleEntries,
         cards,
         workspaces,
-        archivedProjects
+        archivedProjects,
+        archivedConversations
       };
     }
 
@@ -2612,13 +3044,19 @@ class ContextHealthServer {
       };
     }
 
-    if (UUID_RE.test(hostConvId) && !cards.some((c) => c.id === hostConvId)) {
+    if (
+      UUID_RE.test(hostConvId) &&
+      !this.deletedConvIds.has(hostConvId) &&
+      !cards.some((c) => c.id === hostConvId)
+    ) {
       const hostEntry = sortedEntries.find((e) => e.id === hostConvId);
-      if (hostEntry) {
+      if (hostEntry && !hostEntry.archived && !hostEntry.isSubagent) {
         cards = [this.buildConversationCard(hostEntry, globalObservedCeiling, subagentTokens), ...cards];
-      } else {
-        const candidateWs =
-          detectedActiveWorkspaceNorm || this.metadataWorkspaceCache.get(hostConvId) || '';
+      } else if (!hostEntry) {
+        const cachedWs = this.metadataWorkspaceCache.get(hostConvId) || '';
+        const candidateWs = cachedWs === '__general__'
+          ? ''
+          : (detectedActiveWorkspaceNorm || cachedWs || '');
         const placeholderEntry = createEmptyEntry(hostConvId);
         placeholderEntry.workspacePath = candidateWs;
         cards = [this.buildConversationCard(placeholderEntry, globalObservedCeiling, subagentTokens), ...cards];
@@ -2659,6 +3097,7 @@ class ContextHealthServer {
       defaultModelEnum: this.cachedModelsCatalog.defaultModelEnum || '',
       workspaces,
       archivedProjects,
+      archivedConversations,
       conversations: cards,
       searchMatches
     };
@@ -2861,6 +3300,35 @@ class ContextHealthServer {
       return;
     }
 
+    if (req.method === 'POST' && pathname === '/api/conversation-seen') {
+      const body = await this.readJsonBody(req);
+      const convId = typeof body.conversationId === 'string' ? body.conversationId.trim().toLowerCase() : '';
+      if (!UUID_RE.test(convId)) {
+        sendJson(res, 400, { error: 'Invalid conversationId' });
+        return;
+      }
+      const changed = this.markConversationSeen(convId, true);
+      sendJson(res, 200, { ok: true, conversationId: convId, changed });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/conversation-archive') {
+      const body = await this.readJsonBody(req);
+      const { status, body: outBody } = await this.setConversationArchived(
+        body.conversationId,
+        body.archived
+      );
+      sendJson(res, status, outBody);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/conversation-delete') {
+      const body = await this.readJsonBody(req);
+      const { status, body: outBody } = await this.deleteConversation(body.conversationId);
+      sendJson(res, status, outBody);
+      return;
+    }
+
     if (req.method === 'POST' && pathname === '/_sidecar/send-message') {
       const body = await this.readJsonBody(req);
       const convId = (body.conversationId || '').trim();
@@ -2895,20 +3363,25 @@ class ContextHealthServer {
       }
       this.refreshProjectsRegistry(false);
       const catalog = await this.getModelsCatalog(false);
+      const isGeneral = Boolean(body.general);
       const srcConvId = typeof body.conversationId === 'string' ? body.conversationId.trim().toLowerCase() : '';
       const srcEntry = UUID_RE.test(srcConvId)
         ? (this.convCache.get(srcConvId) || this.refreshSingleEntry(srcConvId))
         : null;
-      const rawWsPath =
-        (typeof body.workspacePath === 'string' && body.workspacePath.trim()) ||
-        (srcEntry && srcEntry.workspacePath) ||
-        '';
+      const rawWsPath = isGeneral
+        ? ''
+        : ((typeof body.workspacePath === 'string' && body.workspacePath.trim()) ||
+           (srcEntry && srcEntry.workspacePath) ||
+           '');
       const normWsPath = rawWsPath ? resolveCanonicalWorkspace(rawWsPath) : '';
       const matchedProj = normWsPath ? this.matchProjectForWorkspace(normWsPath) : null;
-      const effectiveProjectId =
-        (typeof body.projectId === 'string' && body.projectId.trim()) ||
-        (matchedProj ? matchedProj.id : '');
-      const effectiveWsPath = normWsPath || (matchedProj && matchedProj.primaryPath) || '';
+      const effectiveProjectId = isGeneral
+        ? ''
+        : ((typeof body.projectId === 'string' && body.projectId.trim()) ||
+           (matchedProj ? matchedProj.id : ''));
+      const effectiveWsPath = isGeneral
+        ? ''
+        : (normWsPath || (matchedProj && matchedProj.primaryPath) || '');
       const nativeWsPath =
         effectiveWsPath && process.platform === 'win32'
           ? effectiveWsPath.replace(/\//g, '\\')
@@ -2929,8 +3402,11 @@ class ContextHealthServer {
       if (!selectedModelEnum && UUID_RE.test(srcConvId)) {
         selectedModelEnum = await this.resolveConversationModelAsync(srcConvId, false);
       }
-      if (!selectedModelEnum && catalog && catalog.defaultModelEnum) {
-        selectedModelEnum = catalog.defaultModelEnum;
+      if (!selectedModelEnum && catalog) {
+        selectedModelEnum =
+          catalog.defaultModelEnum ||
+          (Array.isArray(catalog.models) && catalog.models[0] ? catalog.models[0].modelEnum : '') ||
+          '';
       }
       if (!matchedModel && selectedModelEnum) {
         matchedModel = this.lookupModelByAny(selectedModelEnum);
@@ -2942,8 +3418,12 @@ class ContextHealthServer {
       const seedNewConversation = (rawNewId) => {
         const cleanNewId = (typeof rawNewId === 'string' ? rawNewId : '').trim().toLowerCase();
         if (!cleanNewId || !UUID_RE.test(cleanNewId)) return;
+        this.deletedConvIds.delete(cleanNewId);
         const nowMs = Date.now();
-        if (effectiveWsPath) {
+        if (isGeneral) {
+          this.metadataWorkspaceCache.set(cleanNewId, '__general__');
+          this.saveMetadataCache();
+        } else if (effectiveWsPath) {
           this.metadataWorkspaceCache.set(cleanNewId, effectiveWsPath);
           this.saveMetadataCache();
         }
@@ -2960,6 +3440,7 @@ class ContextHealthServer {
         preEntry.lastActiveMs = Math.max(preEntry.lastActiveMs || 0, nowMs);
         preEntry.lastUserInputMs = Math.max(preEntry.lastUserInputMs || 0, nowMs);
         preEntry.lastViewMs = Math.max(preEntry.lastViewMs || 0, nowMs);
+        preEntry.lastSeenMs = Math.max(preEntry.lastSeenMs || 0, nowMs);
         if (!preEntry.firstPrompt) {
           preEntry.firstPrompt = message.slice(0, 500);
           preEntry.lastPrompt = preEntry.firstPrompt;
@@ -3043,7 +3524,7 @@ class ContextHealthServer {
         args.push('--model', selectedModelId);
       }
       args.push(message);
-      const out = await execAgentApi(args, effectiveProjectId, this.appDataDir, nativeWsPath);
+      const out = await execAgentApi(args, effectiveProjectId, this.appDataDir, nativeWsPath, 12000, isGeneral);
       if (out && out.error) {
         sendJson(res, 502, out);
         return;

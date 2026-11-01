@@ -259,7 +259,8 @@
       flex-wrap: wrap;
     }
 
-    .btn-solid {
+    .btn-solid,
+    .btn-primary {
       background: var(--foreground, #ededed);
       color: var(--background, #0a0a0a);
       border: 1px solid transparent;
@@ -271,11 +272,13 @@
       transition: opacity 0.12s;
     }
 
-    .btn-solid:hover {
+    .btn-solid:hover,
+    .btn-primary:hover {
       opacity: 0.88;
     }
 
-    .btn-outline {
+    .btn-outline,
+    .btn-secondary {
       background: var(--background, #0a0a0a);
       color: var(--foreground, #ededed);
       border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
@@ -287,7 +290,8 @@
       transition: background 0.12s, border-color 0.12s;
     }
 
-    .btn-outline:hover {
+    .btn-outline:hover,
+    .btn-secondary:hover {
       background: var(--secondary, rgba(255, 255, 255, 0.06));
       border-color: rgba(255, 255, 255, 0.2);
     }
@@ -384,7 +388,15 @@
       gap: 9px;
     }
 
+    .filter-top-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
     .search-input {
+      flex: 1;
+      min-width: 0;
       width: 100%;
       background: var(--background, #0a0a0a);
       color: var(--foreground, #ededed);
@@ -402,6 +414,94 @@
 
     .search-input:focus {
       border-color: var(--muted-foreground, #888888);
+    }
+
+    .btn-new-chat {
+      background: var(--secondary, rgba(255, 255, 255, 0.07));
+      color: var(--foreground, #ededed);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 12.5px;
+      font-weight: 500;
+      white-space: nowrap;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background 0.12s, border-color 0.12s;
+    }
+
+    .btn-new-chat:hover,
+    .btn-new-chat.active {
+      background: rgba(59, 130, 246, 0.18);
+      border-color: rgba(59, 130, 246, 0.5);
+      color: #93c5fd;
+    }
+
+    .new-chat-drawer {
+      background: var(--background, #0a0a0a);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.11));
+      border-radius: 7px;
+      padding: 9px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .new-chat-scope-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .new-chat-scope-chips {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+
+    .scope-chip {
+      background: transparent;
+      color: var(--muted-foreground, #888888);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+      border-radius: 999px;
+      padding: 2px 9px;
+      font-size: 11.5px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: color 0.12s, background 0.12s, border-color 0.12s;
+    }
+
+    .scope-chip:hover {
+      color: var(--foreground, #ededed);
+    }
+
+    .scope-chip.active {
+      background: rgba(59, 130, 246, 0.16);
+      color: #93c5fd;
+      border-color: rgba(59, 130, 246, 0.45);
+    }
+
+    .new-chat-textarea {
+      width: 100%;
+      min-height: 68px;
+      max-height: 220px;
+      resize: vertical;
+      background: var(--card, #141414);
+      color: var(--foreground, #ededed);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+      border-radius: 6px;
+      padding: 7px 9px;
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.45;
+      outline: none;
+    }
+
+    .new-chat-textarea:focus {
+      border-color: rgba(59, 130, 246, 0.55);
     }
 
     .scope-tabs {
@@ -435,6 +535,9 @@
     }
 
     .scope-tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
       background: transparent;
       color: var(--muted-foreground, #888888);
       border: 1px solid transparent;
@@ -468,6 +571,45 @@
       color: var(--foreground, #ededed);
     }
 
+    .unread-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #3b82f6;
+      box-shadow: 0 0 6px rgba(59, 130, 246, 0.8);
+      flex-shrink: 0;
+    }
+
+    .thinking-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      flex-shrink: 0;
+      vertical-align: middle;
+    }
+
+    .thinking-dots span {
+      width: 3.5px;
+      height: 3.5px;
+      border-radius: 50%;
+      background: #60a5fa;
+      animation: chPulseDot 1.2s infinite ease-in-out;
+    }
+
+    .thinking-dots span:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+
+    .thinking-dots span:nth-child(3) {
+      animation-delay: 0.4s;
+    }
+
+    @keyframes chPulseDot {
+      0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+      40% { opacity: 1; transform: scale(1.15); }
+    }
+
     .conv-row {
       background: var(--card, #141414);
       border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
@@ -477,6 +619,10 @@
       flex-direction: column;
       gap: 7px;
       transition: border-color 0.12s;
+    }
+
+    .conv-row.is-unread {
+      border-color: rgba(59, 130, 246, 0.38);
     }
 
     .conv-row-header {
@@ -489,12 +635,24 @@
       border-color: rgba(255, 255, 255, 0.18);
     }
 
+    .conv-row.is-unread:hover {
+      border-color: rgba(59, 130, 246, 0.55);
+    }
+
     .conv-row-top {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 8px;
       cursor: pointer;
+    }
+
+    .conv-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex: 1;
     }
 
     .conv-title {
@@ -505,18 +663,50 @@
       overflow: hidden;
       text-overflow: ellipsis;
       min-width: 0;
-      flex: 1;
     }
 
-    .conv-last-msg {
-      font-size: 12.5px;
-      font-weight: 400;
+    .conv-previews {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      cursor: pointer;
+      margin-top: -2px;
+    }
+
+    .conv-msg-line {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      line-height: 1.38;
       color: var(--muted-foreground, #888888);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      cursor: pointer;
-      margin-top: -3px;
+    }
+
+    .conv-msg-role {
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 0.01em;
+      color: var(--muted-foreground, #777777);
+      flex-shrink: 0;
+    }
+
+    .conv-msg-ai.unread .conv-msg-role,
+    .conv-msg-ai.thinking .conv-msg-role {
+      color: #60a5fa;
+    }
+
+    .conv-msg-ai.unread .conv-msg-text {
+      color: var(--foreground, #e5e5e5);
+    }
+
+    .conv-msg-text {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
     }
 
     .conv-row-bottom {
@@ -543,6 +733,66 @@
       align-items: center;
       gap: 3px;
       flex-shrink: 0;
+    }
+
+    .conv-row .conv-actions {
+      width: 100%;
+    }
+
+    .card-menu-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .conv-row .card-menu-wrap {
+      margin-left: auto;
+    }
+
+    .gear-btn {
+      padding: 2px 6px;
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
+    .card-menu {
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 4px);
+      min-width: 118px;
+      background: var(--card, #181818);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
+      border-radius: 7px;
+      padding: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.55);
+      z-index: 200;
+    }
+
+    .card-menu-item {
+      background: transparent;
+      border: none;
+      border-radius: 5px;
+      padding: 5px 9px;
+      text-align: left;
+      font-size: 12.5px;
+      color: var(--foreground, #ededed);
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+
+    .card-menu-item:hover {
+      background: var(--secondary, rgba(255, 255, 255, 0.08));
+    }
+
+    .card-menu-item.danger {
+      color: #f87171;
+    }
+
+    .card-menu-item.danger:hover {
+      background: rgba(239, 68, 68, 0.15);
     }
 
     .drawer {
@@ -857,6 +1107,21 @@
       gap: 6px;
       margin-top: 2px;
     }
+
+    .btn-danger {
+      background: #dc2626;
+      color: #ffffff;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 5px 11px;
+      font-size: 12.5px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .btn-danger:hover {
+      background: #ef4444;
+    }
   </style>
 </head>
 <body>
@@ -884,12 +1149,16 @@
       </div>
       <div class="section-body">
         <div class="filter-card">
-          <input
-            type="text"
-            id="search-input"
-            class="search-input"
-            placeholder="Filter conversations or prompts..."
-          />
+          <div class="filter-top-row">
+            <input
+              type="text"
+              id="search-input"
+              class="search-input"
+              placeholder="Filter conversations or prompts..."
+            />
+            <button class="btn-new-chat" id="btn-toggle-new-chat" data-action="toggle-new-chat" title="Start a new conversation">+ New</button>
+          </div>
+          <div id="new-chat-slot" class="card-slot"></div>
           <div class="scope-tabs" id="workspace-pills"></div>
         </div>
         <div id="cards-container" style="display:flex;flex-direction:column;gap:8px;"></div>
@@ -902,7 +1171,7 @@
 
   <script>
     (function() {
-      const initialHostConvId = (
+      let initialHostConvId = (
         (window.sidecar && window.sidecar.conversationId) ||
         new URLSearchParams(window.location.search).get('conversationId') ||
         (window.__SIDECAR_BOOT__ && window.__SIDECAR_BOOT__.conversationId) ||
@@ -945,6 +1214,7 @@
         conversations: [],
         workspaces: [],
         archivedProjects: [],
+        archivedConversations: [],
         availableModels: [],
         defaultModelEnum: '',
         activeWorkspaceKey: '',
@@ -953,12 +1223,19 @@
         expandedPromptKeys: new Set(),
         openHandoffId: null,
         pendingSmartHandoff: null,
-        handoffStateByConv: new Map()
+        handoffStateByConv: new Map(),
+        openMenuConvId: null,
+        newChatOpen: false,
+        newChatText: '',
+        newChatGeneral: false,
+        newChatSending: false
       };
 
       const pinnedContainer = document.getElementById('pinned-container');
       const cardsContainer = document.getElementById('cards-container');
       const workspacePillsEl = document.getElementById('workspace-pills');
+      const newChatSlotEl = document.getElementById('new-chat-slot');
+      const btnToggleNewChatEl = document.getElementById('btn-toggle-new-chat');
       const searchInput = document.getElementById('search-input');
       const activeWsIndicator = document.getElementById('active-workspace-indicator');
       const listHeaderTitle = document.getElementById('list-header-title');
@@ -1049,11 +1326,16 @@
         if (state.selectedWorkspaceKey !== '__auto__') {
           return state.selectedWorkspaceKey;
         }
-        if (state.activeWorkspaceKey) {
-          return state.activeWorkspaceKey;
-        }
         if (activeCard && activeCard.workspaceKey) {
           return activeCard.workspaceKey;
+        }
+        if (activeCard && !activeCard.workspaceKey && activeCard.promptCount > 0) {
+          if (state.workspaces.some((w) => w.key === '__unscoped__')) {
+            return '__unscoped__';
+          }
+        }
+        if (state.activeWorkspaceKey) {
+          return state.activeWorkspaceKey;
         }
         return '__all__';
       }
@@ -1469,9 +1751,29 @@
                 (isHandoffOpen ? 'Close Handoff' : 'Smart Handoff') +
               '</button>' +
             '</div>' +
-            '<button class="ghost-btn" data-action="toggle-details" data-id="' + escapeHtml(card.id) + '">' +
-              (isDetailsOpen ? 'Hide History' : 'History &amp; Commits') +
-            '</button>' +
+            '<div class="conv-actions">' +
+              '<button class="ghost-btn" data-action="toggle-details" data-id="' + escapeHtml(card.id) + '">' +
+                (isDetailsOpen ? 'Hide History' : 'History &amp; Commits') +
+              '</button>' +
+              renderCardGearMenu(card) +
+            '</div>' +
+          '</div>'
+        );
+      }
+
+      function renderCardGearMenu(card) {
+        const idEsc = escapeHtml(card.id);
+        const titleEsc = escapeHtml(card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8)));
+        const isMenuOpen = state.openMenuConvId === card.id;
+        return (
+          '<div class="card-menu-wrap">' +
+            '<button class="ghost-btn gear-btn" data-action="toggle-card-menu" data-id="' + idEsc + '" title="Conversation actions" aria-label="Conversation actions">⚙</button>' +
+            (isMenuOpen
+              ? '<div class="card-menu">' +
+                  '<button class="card-menu-item" data-action="archive-conv" data-id="' + idEsc + '">Archive</button>' +
+                  '<button class="card-menu-item danger" data-action="prompt-delete-conv" data-id="' + idEsc + '" data-title="' + titleEsc + '">Delete</button>' +
+                '</div>'
+              : '') +
           '</div>'
         );
       }
@@ -1479,11 +1781,44 @@
       function renderCompactRowHeader(card, showWorkspaceName) {
         const tier = getCardTier(card);
         const titleText = card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
-        const lastMsgText = card.lastPrompt || card.firstPrompt || '';
-        const showLastMsg = Boolean(lastMsgText && lastMsgText !== titleText);
-        const lastMsgHtml = showLastMsg
-          ? '<div class="conv-last-msg" data-action="open-chat" data-id="' + escapeHtml(card.id) + '" title="' + escapeHtml(lastMsgText) + '">' + escapeHtml(lastMsgText) + '</div>'
-          : '';
+        const userMsgText = (card.lastPrompt || card.firstPrompt || '').trim();
+        const aiMsgText = (card.lastModelResponse || '').trim();
+
+        let statusBadgeHtml = '';
+        if (card.isThinking) {
+          statusBadgeHtml = '<span class="thinking-dots" title="Agent is thinking"><span></span><span></span><span></span></span>';
+        } else if (card.unread) {
+          statusBadgeHtml = '<span class="unread-dot" title="Unread reply"></span>';
+        }
+
+        let previewsHtml = '';
+        const showUserLine = Boolean(userMsgText);
+        const showAiLine = Boolean(card.isThinking || aiMsgText);
+        if (showUserLine || showAiLine) {
+          previewsHtml += '<div class="conv-previews" data-action="open-chat" data-id="' + escapeHtml(card.id) + '">';
+          if (showUserLine) {
+            previewsHtml +=
+              '<div class="conv-msg-line" title="' + escapeHtml(userMsgText) + '">' +
+                '<span class="conv-msg-role">You:</span>' +
+                '<span class="conv-msg-text">' + escapeHtml(userMsgText) + '</span>' +
+              '</div>';
+          }
+          if (card.isThinking) {
+            previewsHtml +=
+              '<div class="conv-msg-line conv-msg-ai thinking" title="' + escapeHtml(aiMsgText || 'Agent is thinking...') + '">' +
+                '<span class="conv-msg-role">AI:</span>' +
+                '<span class="conv-msg-text">' + escapeHtml(aiMsgText || 'Thinking...') + '</span>' +
+              '</div>';
+          } else if (aiMsgText) {
+            previewsHtml +=
+              '<div class="conv-msg-line conv-msg-ai' + (card.unread ? ' unread' : '') + '" title="' + escapeHtml(aiMsgText) + '">' +
+                '<span class="conv-msg-role">AI:</span>' +
+                '<span class="conv-msg-text">' + escapeHtml(aiMsgText) + '</span>' +
+              '</div>';
+          }
+          previewsHtml += '</div>';
+        }
+
         const compactedNote = card.compactedPrompts > 0
           ? ' (' + card.compactedPrompts + ' compacted)'
           : '';
@@ -1520,10 +1855,13 @@
 
         return (
           '<div class="conv-row-top" data-action="open-chat" data-id="' + escapeHtml(card.id) + '" title="Switch to this conversation">' +
-            '<span class="conv-title">' + escapeHtml(titleText) + '</span>' +
+            '<div class="conv-title-wrap">' +
+              statusBadgeHtml +
+              '<span class="conv-title">' + escapeHtml(titleText) + '</span>' +
+            '</div>' +
             '<span class="muted">' + escapeHtml(formatRelativeTime(card.lastActiveMs)) + '</span>' +
           '</div>' +
-          lastMsgHtml +
+          previewsHtml +
           '<div class="conv-row-bottom">' +
             '<div class="conv-meta">' +
               '<span class="tier-label ' + tier.text + '">' +
@@ -1542,6 +1880,7 @@
               '<button class="ghost-btn" data-action="toggle-details" data-id="' + escapeHtml(card.id) + '">' +
                 (isDetailsOpen ? 'Hide' : 'History') +
               '</button>' +
+              renderCardGearMenu(card) +
             '</div>' +
           '</div>' +
           searchHitsHtml
@@ -1560,6 +1899,9 @@
       }
 
       function syncCardDom(cardEl, card, headerHtml) {
+        if (cardEl.classList.contains('conv-row')) {
+          cardEl.classList.toggle('is-unread', Boolean(card.unread));
+        }
         const headerSlot = cardEl.querySelector('.card-header-slot');
         if (headerSlot && headerSlot.innerHTML !== headerHtml) {
           headerSlot.innerHTML = headerHtml;
@@ -1603,18 +1945,114 @@
         }
       }
 
+      function resolveNewChatTargetWorkspace(effectiveScope, pinnedCard) {
+        if (effectiveScope && effectiveScope !== '__all__' && effectiveScope !== '__unscoped__') {
+          const ws = state.workspaces.find((w) => w.key === effectiveScope);
+          if (ws) return ws;
+        }
+        if (state.activeWorkspaceKey && state.activeWorkspaceKey !== '__unscoped__') {
+          const ws = state.workspaces.find((w) => w.key === state.activeWorkspaceKey);
+          if (ws) return ws;
+        }
+        if (pinnedCard && (pinnedCard.projectId || pinnedCard.workspacePath)) {
+          return {
+            key: pinnedCard.workspaceKey || '',
+            projectId: pinnedCard.projectId || '',
+            path: pinnedCard.workspacePath || '',
+            name: pinnedCard.workspaceName || 'Current Project'
+          };
+        }
+        const firstProjWs = state.workspaces.find((w) => w.key !== '__unscoped__' && (w.projectId || w.path));
+        return firstProjWs || null;
+      }
+
+      function renderNewChatDrawer(effectiveScope, pinnedCard) {
+        if (!newChatSlotEl) return;
+        if (btnToggleNewChatEl) {
+          btnToggleNewChatEl.classList.toggle('active', Boolean(state.newChatOpen));
+        }
+        if (!state.newChatOpen) {
+          if (newChatSlotEl.innerHTML !== '') {
+            newChatSlotEl.innerHTML = '';
+          }
+          return;
+        }
+
+        const targetWs = resolveNewChatTargetWorkspace(effectiveScope, pinnedCard);
+        const hasProjectTarget = Boolean(targetWs && (targetWs.projectId || targetWs.path));
+        const isGeneral = !hasProjectTarget || Boolean(state.newChatGeneral);
+
+        const scopeKey = [
+          hasProjectTarget ? (targetWs.key || targetWs.name) : 'none',
+          isGeneral ? 'general' : 'project',
+          state.newChatSending ? 'sending' : 'idle'
+        ].join('|');
+
+        const existingDrawer = newChatSlotEl.querySelector('.new-chat-drawer');
+        if (existingDrawer && existingDrawer.getAttribute('data-scope-key') === scopeKey) {
+          return;
+        }
+
+        const activeTa = existingDrawer ? existingDrawer.querySelector('.new-chat-textarea') : null;
+        if (activeTa) {
+          state.newChatText = activeTa.value;
+        }
+
+        let chipsHtml = '';
+        if (hasProjectTarget) {
+          chipsHtml +=
+            '<button class="scope-chip ' + (!isGeneral ? 'active' : '') + '" data-action="set-new-chat-scope" data-general="0" title="' + escapeHtml(targetWs.path || targetWs.name) + '">' +
+              'Project: ' + escapeHtml(targetWs.name) +
+            '</button>';
+        }
+        chipsHtml +=
+          '<button class="scope-chip ' + (isGeneral ? 'active' : '') + '" data-action="set-new-chat-scope" data-general="1" title="Start a general conversation outside any project">' +
+            'General (No Project)' +
+          '</button>';
+
+        newChatSlotEl.innerHTML =
+          '<div class="new-chat-drawer" data-scope-key="' + escapeHtml(scopeKey) + '">' +
+            '<div class="new-chat-scope-row">' +
+              '<div class="new-chat-scope-chips">' + chipsHtml + '</div>' +
+            '</div>' +
+            '<textarea class="new-chat-textarea" id="new-chat-textarea" placeholder="Write a prompt to start a new conversation... (Ctrl+Enter to send)"' + (state.newChatSending ? ' readonly' : '') + '>' +
+              escapeHtml(state.newChatText) +
+            '</textarea>' +
+            '<div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;">' +
+              '<button class="ghost-btn" data-action="toggle-new-chat"' + (state.newChatSending ? ' disabled' : '') + '>Cancel</button>' +
+              '<button class="btn-solid" data-action="submit-new-chat"' + (state.newChatSending ? ' disabled' : '') + '>' +
+                (state.newChatSending ? 'Starting...' : 'Start Chat') +
+              '</button>' +
+            '</div>' +
+          '</div>';
+
+        const nextTa = newChatSlotEl.querySelector('.new-chat-textarea');
+        if (nextTa) {
+          nextTa.value = state.newChatText;
+        }
+      }
+
       function renderWorkspacePills(effectiveScope, pinnedId) {
-        const otherMain = state.conversations.filter((c) => !c.isSubagent && c.id !== pinnedId);
+        const allMain = state.conversations.filter((c) => !c.isSubagent);
+        const otherMain = allMain.filter((c) => c.id !== pinnedId);
         const countsByWs = new Map();
-        for (const c of otherMain) {
+        const unreadByWs = new Map();
+        const thinkingByWs = new Map();
+        for (const c of allMain) {
           const k = c.workspaceKey || '__unscoped__';
-          countsByWs.set(k, (countsByWs.get(k) || 0) + 1);
+          if (c.isThinking) thinkingByWs.set(k, true);
+          if (c.id !== pinnedId) {
+            countsByWs.set(k, (countsByWs.get(k) || 0) + 1);
+            if (c.unread) unreadByWs.set(k, true);
+          }
         }
 
         let html = '';
         for (const ws of state.workspaces) {
           const otherCount = countsByWs.get(ws.key) || 0;
-          if (otherCount === 0 && effectiveScope !== ws.key) continue;
+          const hasUnread = Boolean(unreadByWs.get(ws.key));
+          const hasThinking = Boolean(thinkingByWs.get(ws.key));
+          if (otherCount === 0 && !hasThinking && !hasUnread && effectiveScope !== ws.key) continue;
           const isActive = effectiveScope === ws.key;
           const projAttrs = ws.projectId
             ? ' data-project-id="' + escapeHtml(ws.projectId) + '" data-project-name="' + escapeHtml(ws.name) + '"'
@@ -1622,21 +2060,32 @@
           const tip = ws.projectId
             ? (ws.path ? ws.path + ' · Right-click to archive project' : 'Right-click to archive project')
             : (ws.path || '');
+          let indicatorHtml = '';
+          if (hasThinking) {
+            indicatorHtml += '<span class="thinking-dots" title="Agent is thinking in this project"><span></span><span></span><span></span></span>';
+          }
+          if (hasUnread) {
+            indicatorHtml += '<span class="unread-dot" title="Unread reply in this project"></span>';
+          }
           html +=
             '<button class="scope-tab ' + (isActive ? 'active' : '') + '" data-ws="' + escapeHtml(ws.key) + '"' + projAttrs + ' title="' + escapeHtml(tip) + '">' +
-              escapeHtml(ws.name) + ' (' + otherCount + ')' +
+              indicatorHtml +
+              '<span>' + escapeHtml(ws.name) + ' (' + otherCount + ')</span>' +
             '</button>';
         }
 
         html +=
           '<button class="scope-tab ' + (effectiveScope === '__all__' ? 'active' : '') + '" data-ws="__all__">' +
-            'All (' + otherMain.length + ')' +
+            '<span>All (' + otherMain.length + ')</span>' +
           '</button>';
 
-        if (Array.isArray(state.archivedProjects) && state.archivedProjects.length > 0) {
+        const archivedProjCount = Array.isArray(state.archivedProjects) ? state.archivedProjects.length : 0;
+        const archivedConvCount = Array.isArray(state.archivedConversations) ? state.archivedConversations.length : 0;
+        const totalArchivedCount = archivedProjCount + archivedConvCount;
+        if (totalArchivedCount > 0) {
           html +=
-            '<button class="scope-tab scope-tab-archived" data-action="open-archived-modal" title="View and unarchive hidden projects">' +
-              'Archived (' + state.archivedProjects.length + ')' +
+            '<button class="scope-tab scope-tab-archived" data-action="open-archived-modal" title="View and restore archived conversations and projects">' +
+              'Archived (' + totalArchivedCount + ')' +
             '</button>';
         }
 
@@ -1684,7 +2133,7 @@
           : (mainChats.length > 0 ? mainChats : state.conversations);
         const newestWsCard = pickMostRecentFocusCard(candidatePool);
 
-        let pinnedCard = initialHostConvId ? hostCard : (hostCard || newestWsCard);
+        let pinnedCard = hostCard || newestWsCard;
         if (!initialHostConvId) {
           const isManuallyPinned = Boolean(hostCard && state.manualPinId && state.manualPinId === hostCard.id);
           const isPendingOnHost = Boolean(
@@ -1721,6 +2170,7 @@
 
         const pinnedId = pinnedCard ? pinnedCard.id : '';
         if (state.lastPinnedId && pinnedId && state.lastPinnedId !== pinnedId) {
+          state.selectedWorkspaceKey = '__auto__';
           const isOldPending = Boolean(
             state.pendingSmartHandoff && state.pendingSmartHandoff.convId === state.lastPinnedId
           );
@@ -1752,6 +2202,7 @@
         }
 
         const effectiveScope = resolveEffectiveWorkspaceScope(pinnedCard);
+        renderNewChatDrawer(effectiveScope, pinnedCard);
         renderWorkspacePills(effectiveScope, pinnedId);
 
         const q = state.searchQuery.trim().toLowerCase();
@@ -1814,7 +2265,8 @@
             (c) =>
               state.openHandoffId === c.id ||
               Boolean(state.pendingSmartHandoff && state.pendingSmartHandoff.convId === c.id) ||
-              state.expandedDetails.has(c.id)
+              state.expandedDetails.has(c.id) ||
+              state.openMenuConvId === c.id
           );
 
           for (let i = 0; i < filtered.length; i++) {
@@ -1845,6 +2297,9 @@
           }
           if (force) params.set('force', '1');
           if (state.hostConvId) params.set('activeConvId', state.hostConvId);
+          if (isThisIframeActiveConv() && (state.lastPinnedId || state.hostConvId)) {
+            params.set('viewedConvId', state.lastPinnedId || state.hostConvId);
+          }
           if (state.workspaceUris.length > 0) {
             params.set('workspaceUris', JSON.stringify(state.workspaceUris));
           }
@@ -1872,6 +2327,7 @@
           state.activeWorkspaceKey = data.activeWorkspaceKey || '';
           state.workspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
           state.archivedProjects = Array.isArray(data.archivedProjects) ? data.archivedProjects : [];
+          state.archivedConversations = Array.isArray(data.archivedConversations) ? data.archivedConversations : [];
           if (Array.isArray(data.availableModels) && data.availableModels.length > 0) {
             state.availableModels = data.availableModels;
           }
@@ -2069,55 +2525,123 @@
         const card = state.conversations.find((c) => c.id === convId);
         const selectedModel = resolveSelectedModelEntry(card);
         try {
-          const httpRes = await apiFetch('/_sidecar/new-conversation', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+          await postAndActivateNewConversation(
+            {
               message: promptText,
               conversationId: convId,
               projectId: (card && card.projectId) || '',
               workspacePath: (card && card.workspacePath) || '',
               model: (selectedModel && selectedModel.modelEnum) || (card && card.modelEnum) || '',
               modelId: (selectedModel && selectedModel.modelId) || ''
-            })
-          });
-          const res = await httpRes.json().catch(() => ({}));
-          if (!httpRes.ok || (res && res.error)) {
-            throw new Error((res && res.error) || 'Failed to start conversation');
-          }
-          const rawUuidMatch =
-            res && typeof res.raw === 'string'
-              ? /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(res.raw)
-              : null;
-          const newConvId = (
-            (res && (res.conversationId || res.conversation_id)) ||
-            (res && res.response && (res.response.conversationId || res.response.conversation_id)) ||
-            (rawUuidMatch ? rawUuidMatch[1] : '') ||
-            ''
-          ).trim().toLowerCase();
-          state.openHandoffId = null;
-          state.handoffStateByConv.delete(convId);
-          if (newConvId) {
-            if (!initialHostConvId) {
-              state.hostConvId = newConvId;
-              state.manualPinId = newConvId;
-              state.manualPinTs = Date.now();
+            },
+            () => {
+              state.openHandoffId = null;
+              state.handoffStateByConv.delete(convId);
             }
-            openConversationInHost(newConvId);
-          } else if (!initialHostConvId) {
-            state.manualPinId = '';
-            state.manualPinTs = 0;
-          }
-          await fetchStatus(true);
+          );
           showToast('Started new conversation with handoff!');
-          setTimeout(() => { if (!isIframeHidden()) fetchStatus(true); }, 800);
-          setTimeout(() => { if (!isIframeHidden()) fetchStatus(true); }, 2200);
           return;
         } catch (chatErr) {
           console.warn('[ContextHealth] startConversation failed, falling back to clipboard:', chatErr);
           await copyTextToClipboard(promptText);
           showToast('Could not start chat automatically; copied prompt to clipboard');
           return;
+        }
+      }
+
+      async function postAndActivateNewConversation(reqBody, onBeforeActivate) {
+        const httpRes = await apiFetch('/_sidecar/new-conversation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(reqBody)
+        });
+        const res = await httpRes.json().catch(() => ({}));
+        if (!httpRes.ok || (res && res.error)) {
+          throw new Error((res && res.error) || 'Failed to start conversation');
+        }
+        const rawUuidMatch =
+          res && typeof res.raw === 'string'
+            ? /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(res.raw)
+            : null;
+        const newConvId = (
+          (res && (res.conversationId || res.conversation_id)) ||
+          (res && res.response && (res.response.conversationId || res.response.conversation_id)) ||
+          (rawUuidMatch ? rawUuidMatch[1] : '') ||
+          ''
+        ).trim().toLowerCase();
+
+        if (typeof onBeforeActivate === 'function') {
+          onBeforeActivate(newConvId);
+        }
+
+        if (newConvId) {
+          state.selectedWorkspaceKey = '__auto__';
+          if (!initialHostConvId) {
+            state.hostConvId = newConvId;
+            state.manualPinId = newConvId;
+            state.manualPinTs = Date.now();
+          }
+          claimActiveConversation(newConvId);
+          openConversationInHost(newConvId);
+        } else if (!initialHostConvId) {
+          state.manualPinId = '';
+          state.manualPinTs = 0;
+        }
+        await fetchStatus(true);
+        setTimeout(() => { if (!isIframeHidden()) fetchStatus(true); }, 800);
+        setTimeout(() => { if (!isIframeHidden()) fetchStatus(true); }, 2200);
+        return newConvId;
+      }
+
+      async function handleStartQuickNewChat() {
+        const ta = document.getElementById('new-chat-textarea');
+        if (ta) {
+          state.newChatText = ta.value;
+        }
+        const promptText = (state.newChatText || '').trim();
+        if (!promptText) {
+          showToast('Write a message to start a conversation');
+          if (ta) ta.focus();
+          return;
+        }
+        if (state.newChatSending) return;
+        state.newChatSending = true;
+
+        const pinnedCard = state.conversations.find((c) => c.id === state.lastPinnedId) || null;
+        const effectiveScope = resolveEffectiveWorkspaceScope(pinnedCard);
+        const targetWs = resolveNewChatTargetWorkspace(effectiveScope, pinnedCard);
+        const hasProjectTarget = Boolean(targetWs && (targetWs.projectId || targetWs.path));
+        const isGeneral = !hasProjectTarget || Boolean(state.newChatGeneral);
+
+        const preferredModelEnum =
+          (pinnedCard && pinnedCard.modelEnum) ||
+          state.defaultModelEnum ||
+          (state.availableModels[0] && state.availableModels[0].modelEnum) ||
+          '';
+
+        renderNewChatDrawer(effectiveScope, pinnedCard);
+
+        try {
+          await postAndActivateNewConversation(
+            {
+              message: promptText,
+              general: isGeneral,
+              conversationId: (pinnedCard && pinnedCard.id) || state.hostConvId || '',
+              projectId: isGeneral ? '' : ((targetWs && targetWs.projectId) || ''),
+              workspacePath: isGeneral ? '' : ((targetWs && targetWs.path) || ''),
+              model: preferredModelEnum
+            },
+            () => {
+              state.newChatSending = false;
+              state.newChatOpen = false;
+              state.newChatText = '';
+            }
+          );
+          showToast(isGeneral ? 'Started new general conversation!' : 'Started new conversation!');
+        } catch (err) {
+          state.newChatSending = false;
+          renderAll();
+          showToast('Error starting conversation: ' + err.message);
         }
       }
 
@@ -2129,6 +2653,144 @@
         }
         await copyTextToClipboard(promptText);
         showToast('Copied handoff prompt');
+      }
+
+      function markConversationSeenInServer(convId) {
+        if (!convId) return;
+        const card = state.conversations.find((c) => c.id === convId);
+        if (card) {
+          card.unread = false;
+        }
+        void apiFetch('/api/conversation-seen', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversationId: convId })
+        }).catch(() => {});
+      }
+
+      function pickFallbackConversationAfterRemove(removedConvId) {
+        const remaining = state.conversations.filter(
+          (c) => !c.isSubagent && c.id !== removedConvId
+        );
+        if (remaining.length === 0) return null;
+        if (state.activeWorkspaceKey) {
+          const sameWs = remaining.filter((c) => c.workspaceKey === state.activeWorkspaceKey);
+          if (sameWs.length > 0) return sameWs[0];
+        }
+        return remaining[0];
+      }
+
+      async function handleSetConversationArchived(convId, archived) {
+        if (!convId) return;
+        state.openMenuConvId = null;
+        try {
+          if (archived && (convId === state.lastPinnedId || convId === state.hostConvId || convId === initialHostConvId)) {
+            if (convId === initialHostConvId) {
+              initialHostConvId = '';
+            }
+            const fallback = pickFallbackConversationAfterRemove(convId);
+            if (fallback) {
+              state.hostConvId = fallback.id;
+              state.manualPinId = fallback.id;
+              state.manualPinTs = Date.now();
+              openConversationInHost(fallback.id);
+            } else {
+              state.hostConvId = '';
+              state.manualPinId = '';
+              state.lastPinnedId = '';
+            }
+          }
+          const res = await apiFetch('/api/conversation-archive', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conversationId: convId, archived: Boolean(archived) })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) {
+            throw new Error(data.error || 'Failed to update conversation');
+          }
+          await fetchStatus(true);
+          const totalArch =
+            (Array.isArray(state.archivedProjects) ? state.archivedProjects.length : 0) +
+            (Array.isArray(state.archivedConversations) ? state.archivedConversations.length : 0);
+          if (!archived && totalArch > 0 && modalBackdropEl.classList.contains('open')) {
+            openArchivedModal();
+          } else {
+            closeModal();
+          }
+          showToast(archived ? 'Archived conversation' : 'Restored conversation');
+        } catch (err) {
+          closeModal();
+          showToast('Error: ' + err.message);
+        }
+      }
+
+      function openDeleteConvConfirmModal(convId, convTitle) {
+        if (!modalBackdropEl || !convId) return;
+        state.openMenuConvId = null;
+        renderAll();
+        const safeTitle = escapeHtml(convTitle || ('Conversation ' + convId.slice(0, 8)));
+        modalBackdropEl.innerHTML =
+          '<div class="modal-card" role="dialog" aria-modal="true">' +
+            '<div class="modal-title">Delete conversation?</div>' +
+            '<div class="modal-body">' +
+              'Permanently delete <strong>' + safeTitle + '</strong>? This removes the trajectory from Antigravity and cannot be undone.' +
+            '</div>' +
+            '<div class="modal-actions">' +
+              '<button class="btn-secondary" data-action="close-modal">Cancel</button>' +
+              '<button class="btn-danger" data-action="confirm-delete-conv" data-id="' + escapeHtml(convId) + '">Delete</button>' +
+            '</div>' +
+          '</div>';
+        modalBackdropEl.classList.add('open');
+      }
+
+      async function handleDeleteConversation(convId, fromArchivedModal = false) {
+        if (!convId) return;
+        state.openMenuConvId = null;
+        try {
+          if (convId === state.lastPinnedId || convId === state.hostConvId || convId === initialHostConvId) {
+            if (convId === initialHostConvId) {
+              initialHostConvId = '';
+            }
+            const fallback = pickFallbackConversationAfterRemove(convId);
+            if (fallback) {
+              state.hostConvId = fallback.id;
+              state.manualPinId = fallback.id;
+              state.manualPinTs = Date.now();
+              openConversationInHost(fallback.id);
+              await new Promise((r) => setTimeout(r, 120));
+            } else {
+              state.hostConvId = '';
+              state.manualPinId = '';
+              state.lastPinnedId = '';
+            }
+          }
+          const res = await apiFetch('/api/conversation-delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conversationId: convId })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) {
+            throw new Error(data.error || 'Failed to delete conversation');
+          }
+          state.expandedDetails.delete(convId);
+          state.handoffStateByConv.delete(convId);
+          if (state.openHandoffId === convId) state.openHandoffId = null;
+          await fetchStatus(true);
+          const totalArch =
+            (Array.isArray(state.archivedProjects) ? state.archivedProjects.length : 0) +
+            (Array.isArray(state.archivedConversations) ? state.archivedConversations.length : 0);
+          if (fromArchivedModal && totalArch > 0 && modalBackdropEl.classList.contains('open')) {
+            openArchivedModal();
+          } else {
+            closeModal();
+          }
+          showToast('Deleted conversation');
+        } catch (err) {
+          closeModal();
+          showToast('Error: ' + err.message);
+        }
       }
 
       function closeModal() {
@@ -2154,29 +2816,45 @@
         modalBackdropEl.classList.add('open');
       }
 
-      function openArchivedProjectsModal() {
+      function openArchivedModal() {
         if (!modalBackdropEl) return;
-        const list = Array.isArray(state.archivedProjects) ? state.archivedProjects : [];
-        if (list.length === 0) {
+        const projList = Array.isArray(state.archivedProjects) ? state.archivedProjects : [];
+        const convList = Array.isArray(state.archivedConversations) ? state.archivedConversations : [];
+        if (projList.length === 0 && convList.length === 0) {
           closeModal();
           return;
         }
         let rowsHtml = '';
-        for (const p of list) {
+        for (const c of convList) {
+          const title = c.title || c.firstPrompt || c.lastPrompt || ('Conversation ' + c.id.slice(0, 8));
+          const sub = [c.workspaceName || 'General', formatRelativeTime(c.lastActiveMs)].filter(Boolean).join(' · ');
+          rowsHtml +=
+            '<div class="modal-row">' +
+              '<div class="modal-row-info">' +
+                '<span class="modal-row-name">' + escapeHtml(title) + '</span>' +
+                '<span class="modal-row-sub">Chat · ' + escapeHtml(sub) + '</span>' +
+              '</div>' +
+              '<div style="display:flex;gap:4px;flex-shrink:0;">' +
+                '<button class="btn-primary" data-action="confirm-unarchive-conv" data-id="' + escapeHtml(c.id) + '">Restore</button>' +
+                '<button class="btn-danger" data-action="confirm-delete-conv" data-from-archived="1" data-id="' + escapeHtml(c.id) + '" title="Delete permanently">Delete</button>' +
+              '</div>' +
+            '</div>';
+        }
+        for (const p of projList) {
           const chatLabel = p.count === 1 ? '1 chat' : (p.count + ' chats');
           rowsHtml +=
             '<div class="modal-row">' +
               '<div class="modal-row-info">' +
                 '<span class="modal-row-name">' + escapeHtml(p.name) + '</span>' +
-                '<span class="modal-row-sub">' + escapeHtml(chatLabel + (p.path ? ' · ' + p.path : '')) + '</span>' +
+                '<span class="modal-row-sub">Project · ' + escapeHtml(chatLabel + (p.path ? ' · ' + p.path : '')) + '</span>' +
               '</div>' +
               '<button class="btn-primary" data-action="confirm-unarchive-project" data-project-id="' + escapeHtml(p.id) + '" data-project-name="' + escapeHtml(p.name) + '">Unarchive</button>' +
             '</div>';
         }
         modalBackdropEl.innerHTML =
           '<div class="modal-card" role="dialog" aria-modal="true">' +
-            '<div class="modal-title">Archived Projects (' + list.length + ')</div>' +
-            '<div class="modal-body">Archived projects are hidden from both the Antigravity sidebar and Context Health. Click Unarchive to restore a project:</div>' +
+            '<div class="modal-title">Archived (' + (projList.length + convList.length) + ')</div>' +
+            '<div class="modal-body">Restore or manage archived conversations and projects:</div>' +
             '<div class="modal-list">' + rowsHtml + '</div>' +
             '<div class="modal-actions">' +
               '<button class="btn-secondary" data-action="close-modal">Close</button>' +
@@ -2201,8 +2879,11 @@
             state.selectedWorkspaceKey = '__auto__';
           }
           await fetchStatus(true);
-          if (!archived && state.archivedProjects.length > 0 && modalBackdropEl.classList.contains('open')) {
-            openArchivedProjectsModal();
+          const totalArch =
+            (Array.isArray(state.archivedProjects) ? state.archivedProjects.length : 0) +
+            (Array.isArray(state.archivedConversations) ? state.archivedConversations.length : 0);
+          if (!archived && totalArch > 0 && modalBackdropEl.classList.contains('open')) {
+            openArchivedModal();
           } else {
             closeModal();
           }
@@ -2226,7 +2907,7 @@
         const archBtn = e.target.closest('[data-action="open-archived-modal"]');
         if (archBtn) {
           e.preventDefault();
-          openArchivedProjectsModal();
+          openArchivedModal();
         }
       });
 
@@ -2236,9 +2917,22 @@
           return;
         }
 
+        if (state.openMenuConvId && !e.target.closest('.card-menu-wrap')) {
+          state.openMenuConvId = null;
+          renderAll();
+        }
+
         const wsBtn = e.target.closest('[data-ws]');
         if (wsBtn) {
-          state.selectedWorkspaceKey = wsBtn.getAttribute('data-ws');
+          const nextWs = wsBtn.getAttribute('data-ws');
+          state.selectedWorkspaceKey = nextWs;
+          if (state.newChatOpen) {
+            if (nextWs === '__unscoped__') {
+              state.newChatGeneral = true;
+            } else if (nextWs && nextWs !== '__all__') {
+              state.newChatGeneral = false;
+            }
+          }
           renderAll();
           return;
         }
@@ -2253,7 +2947,7 @@
           return;
         }
         if (action === 'open-archived-modal') {
-          openArchivedProjectsModal();
+          openArchivedModal();
           return;
         }
         if (action === 'confirm-archive-project') {
@@ -2269,6 +2963,56 @@
           handleSetProjectArchived(projId, projName, false, '');
           return;
         }
+        if (action === 'toggle-card-menu' && convId) {
+          state.openMenuConvId = state.openMenuConvId === convId ? null : convId;
+          renderAll();
+          return;
+        }
+        if (action === 'archive-conv' && convId) {
+          handleSetConversationArchived(convId, true);
+          return;
+        }
+        if (action === 'confirm-unarchive-conv' && convId) {
+          handleSetConversationArchived(convId, false);
+          return;
+        }
+        if (action === 'prompt-delete-conv' && convId) {
+          const cTitle = actionBtn.getAttribute('data-title') || '';
+          openDeleteConvConfirmModal(convId, cTitle);
+          return;
+        }
+        if (action === 'confirm-delete-conv' && convId) {
+          const fromArchived = actionBtn.getAttribute('data-from-archived') === '1';
+          handleDeleteConversation(convId, fromArchived);
+          return;
+        }
+        if (action === 'toggle-new-chat') {
+          const ta = document.getElementById('new-chat-textarea');
+          if (ta) state.newChatText = ta.value;
+          state.newChatOpen = !state.newChatOpen;
+          if (state.newChatOpen && sectionOtherEl && sectionOtherEl.classList.contains('collapsed')) {
+            sectionOtherEl.classList.remove('collapsed');
+          }
+          renderAll();
+          if (state.newChatOpen) {
+            const nextTa = document.getElementById('new-chat-textarea');
+            if (nextTa) nextTa.focus();
+          }
+          return;
+        }
+        if (action === 'set-new-chat-scope') {
+          const ta = document.getElementById('new-chat-textarea');
+          if (ta) state.newChatText = ta.value;
+          state.newChatGeneral = actionBtn.getAttribute('data-general') === '1';
+          renderAll();
+          const nextTa = document.getElementById('new-chat-textarea');
+          if (nextTa) nextTa.focus();
+          return;
+        }
+        if (action === 'submit-new-chat') {
+          handleStartQuickNewChat();
+          return;
+        }
 
         if (action === 'toggle-section') {
           const sec = actionBtn.getAttribute('data-section');
@@ -2282,13 +3026,19 @@
         }
 
         if (action === 'open-chat' && convId) {
+          markConversationSeenInServer(convId);
+          const curId = state.lastPinnedId || state.hostConvId;
+          if (convId !== curId) {
+            state.selectedWorkspaceKey = '__auto__';
+          }
           if (!initialHostConvId) {
             const targetCard = state.conversations.find((c) => c.id === convId);
             state.hostConvId = convId;
             state.manualPinId = convId;
             state.manualPinTs = Math.max(getCardFocusMs(targetCard), Date.now());
-            renderAll();
           }
+          renderAll();
+          claimActiveConversation(convId);
           openConversationInHost(convId);
         } else if (action === 'toggle-details' && convId) {
           toggleDetails(convId);
@@ -2361,6 +3111,10 @@
       });
 
       document.addEventListener('input', (e) => {
+        if (e.target && e.target.id === 'new-chat-textarea') {
+          state.newChatText = e.target.value;
+          return;
+        }
         if (e.target && e.target.hasAttribute('data-focus-conv')) {
           const convId = e.target.getAttribute('data-focus-conv');
           const hState = getHandoffState(convId);
@@ -2382,6 +3136,17 @@
         if (e.key === 'Escape' && modalBackdropEl && modalBackdropEl.classList.contains('open')) {
           e.preventDefault();
           closeModal();
+          return;
+        }
+        if (e.target && e.target.id === 'new-chat-textarea') {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            state.newChatOpen = false;
+            renderAll();
+          } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            handleStartQuickNewChat();
+          }
           return;
         }
         if (e.target && e.target.classList && e.target.classList.contains('handoff-input')) {
@@ -2441,23 +3206,89 @@
         showToast('Refreshed');
       });
 
-      function isIframeHidden() {
-        return Boolean(document.hidden || (window.innerWidth === 0 && window.innerHeight === 0));
+      const ACTIVE_CONV_STORAGE_KEY = '__ch_active_conv_id__';
+
+      function isIframeCollapsed() {
+        return Boolean(window.innerWidth === 0 && window.innerHeight === 0);
       }
 
-      let wasIframeHidden = isIframeHidden();
+      function isIframeHidden() {
+        return Boolean(document.hidden || isIframeCollapsed());
+      }
 
-      window.addEventListener('resize', () => {
-        const nowHidden = isIframeHidden();
-        if (!wasIframeHidden && nowHidden) {
-          if (state.openHandoffId && !state.pendingSmartHandoff) {
-            state.openHandoffId = null;
+      function resetTransientScopeAndDrawers() {
+        let needRender = false;
+        if (state.selectedWorkspaceKey !== '__auto__') {
+          state.selectedWorkspaceKey = '__auto__';
+          needRender = true;
+        }
+        if (state.openHandoffId && !state.pendingSmartHandoff) {
+          state.openHandoffId = null;
+          needRender = true;
+        }
+        if (state.openMenuConvId) {
+          state.openMenuConvId = null;
+          needRender = true;
+        }
+        if (needRender) {
+          renderAll();
+        }
+      }
+
+      function isThisIframeActiveConv() {
+        if (isIframeHidden()) return false;
+        if (document.hasFocus()) return true;
+        const myId = (state.lastPinnedId || state.hostConvId || '').trim().toLowerCase();
+        try {
+          const claimedId = (localStorage.getItem(ACTIVE_CONV_STORAGE_KEY) || '').trim().toLowerCase();
+          if (claimedId && myId && claimedId !== myId) return false;
+        } catch {}
+        return true;
+      }
+
+      function claimActiveConversation(explicitConvId) {
+        if (!explicitConvId && isIframeHidden()) return;
+        const activeId = (explicitConvId || state.lastPinnedId || state.hostConvId || '').trim().toLowerCase();
+        if (!activeId) return;
+        try {
+          if (localStorage.getItem(ACTIVE_CONV_STORAGE_KEY) !== activeId) {
+            localStorage.setItem(ACTIVE_CONV_STORAGE_KEY, activeId);
+          }
+        } catch {}
+      }
+
+      window.addEventListener('storage', (ev) => {
+        if (!ev || ev.key !== ACTIVE_CONV_STORAGE_KEY) return;
+        if (document.hasFocus()) return;
+        const newActiveId = (ev.newValue || '').trim().toLowerCase();
+        const myId = (state.lastPinnedId || state.hostConvId || '').trim().toLowerCase();
+        if (newActiveId && myId && newActiveId !== myId) {
+          resetTransientScopeAndDrawers();
+        }
+      });
+
+      let wasIframeCollapsed = isIframeCollapsed();
+
+      function syncIframeVisibility() {
+        const nowCollapsed = isIframeCollapsed();
+        if (!wasIframeCollapsed && nowCollapsed) {
+          wasIframeCollapsed = true;
+          resetTransientScopeAndDrawers();
+          return;
+        }
+        if (wasIframeCollapsed && !nowCollapsed) {
+          wasIframeCollapsed = false;
+          if (state.selectedWorkspaceKey !== '__auto__') {
+            state.selectedWorkspaceKey = '__auto__';
             renderAll();
           }
-        } else if (wasIframeHidden && !nowHidden) {
+          claimActiveConversation();
           fetchStatus(false);
         }
-        wasIframeHidden = nowHidden;
+      }
+
+      window.addEventListener('resize', () => {
+        syncIframeVisibility();
       });
 
       if (window.sidecar && typeof window.sidecar.onWorkspaceChange === 'function') {
@@ -2469,20 +3300,33 @@
       }
 
       document.addEventListener('visibilitychange', () => {
+        syncIframeVisibility();
         if (!isIframeHidden()) {
           fetchStatus(false);
         }
       });
 
       window.addEventListener('focus', () => {
+        syncIframeVisibility();
         if (!isIframeHidden()) {
+          claimActiveConversation();
           fetchStatus(false);
         }
       });
 
+      document.addEventListener('pointerdown', () => {
+        if (!isIframeHidden()) {
+          claimActiveConversation();
+        }
+      });
+
       document.addEventListener('pointerenter', () => {
-        if (!isIframeHidden() && (Date.now() - state.lastPollDoneMs) > 400) {
-          fetchStatus(false);
+        syncIframeVisibility();
+        if (!isIframeHidden()) {
+          claimActiveConversation();
+          if ((Date.now() - state.lastPollDoneMs) > 400) {
+            fetchStatus(false);
+          }
         }
       });
 
@@ -2496,10 +3340,14 @@
           } catch {}
         }
         await fetchStatus(true);
+        if (!isIframeHidden()) {
+          claimActiveConversation(state.lastPinnedId || state.hostConvId);
+        }
         void ensureModelsLoaded(state.hostConvId, false);
       })();
 
       setInterval(() => {
+        syncIframeVisibility();
         if (!isIframeHidden() || Boolean(state.pendingSmartHandoff)) {
           fetchStatus(false);
         }
