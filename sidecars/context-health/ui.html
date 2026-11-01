@@ -8,6 +8,9 @@
   <style>
     :root {
       color-scheme: dark;
+      --background: #101010;
+      --foreground: #ededed;
+      --card: #1c1c1c;
     }
 
     * {
@@ -552,7 +555,7 @@
 
     .handoff-input {
       width: 100%;
-      min-height: 180px;
+      min-height: 120px;
       max-height: 420px;
       resize: vertical;
       background: var(--background, #0a0a0a);
@@ -579,6 +582,52 @@
     .handoff-input[readonly] {
       opacity: 0.65;
       cursor: default;
+    }
+
+    .handoff-model-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .handoff-model-group {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .handoff-model-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted-foreground, #888888);
+      white-space: nowrap;
+    }
+
+    .handoff-select {
+      background: var(--background, #0a0a0a);
+      color: var(--foreground, #ededed);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+      border-radius: 5px;
+      padding: 4px 8px;
+      font-family: inherit;
+      font-size: 12.5px;
+      line-height: 1.3;
+      outline: none;
+      cursor: pointer;
+      max-width: 220px;
+      transition: border-color 0.12s;
+    }
+
+    .handoff-select:hover,
+    .handoff-select:focus {
+      border-color: var(--muted-foreground, #888888);
+    }
+
+    .handoff-select option {
+      background: var(--card, #141414);
+      color: var(--foreground, #ededed);
     }
 
     .drawer-subtitle {
@@ -860,10 +909,28 @@
         ''
       ).trim().toLowerCase();
 
+      try {
+        const cachedTheme = sessionStorage.getItem('__ch_theme_vars__');
+        if (cachedTheme) {
+          const parsedVars = JSON.parse(cachedTheme);
+          for (const [k, v] of Object.entries(parsedVars)) {
+            document.documentElement.style.setProperty(k, v);
+          }
+        }
+      } catch {}
+      window.addEventListener('message', (ev) => {
+        if (ev.data && ev.data.type === 'theme-change' && ev.data.payload && ev.data.payload.cssVariables) {
+          try {
+            sessionStorage.setItem('__ch_theme_vars__', JSON.stringify(ev.data.payload.cssVariables));
+          } catch {}
+        }
+      });
+
       const state = {
         version: 0,
         uiMtimeMs: 0,
         hostConvId: initialHostConvId,
+        lastPinnedId: '',
         manualPinId: '',
         manualPinTs: 0,
         detailsRevCounter: 0,
@@ -871,12 +938,15 @@
         workspaceUris: [],
         lastWorkspaceUrisJson: '[]',
         pollInFlight: false,
+        lastPollDoneMs: 0,
         selectedWorkspaceKey: '__auto__',
         searchQuery: '',
         lastFetchedQuery: '',
         conversations: [],
         workspaces: [],
         archivedProjects: [],
+        availableModels: [],
+        defaultModelEnum: '',
         activeWorkspaceKey: '',
         searchMatches: null,
         expandedDetails: new Map(),
@@ -1096,11 +1166,130 @@
           st = {
             step: 'focus',
             text: '',
-            focusUsed: ''
+            selectedModelEnum: null
           };
           state.handoffStateByConv.set(convId, st);
         }
         return st;
+      }
+
+      function parseLabelFamilyAndTier(label) {
+        const clean = (label || '').trim();
+        const m = /^(.+?)\s*\(([^()]+)\)$/.exec(clean);
+        if (m) {
+          return { family: m[1].trim(), tier: m[2].trim() };
+        }
+        return { family: clean || 'Default Model', tier: '' };
+      }
+
+      function getEffectiveModelsForCard(card) {
+        const list = Array.isArray(state.availableModels) ? state.availableModels.slice() : [];
+        if (card && card.modelEnum) {
+          const exists = list.some((m) => m.modelEnum === card.modelEnum);
+          if (!exists) {
+            const label = card.modelLabel || card.modelEnum;
+            const parsed = parseLabelFamilyAndTier(label);
+            list.unshift({
+              modelEnum: card.modelEnum,
+              modelId: '',
+              label,
+              family: parsed.family,
+              tier: parsed.tier
+            });
+          }
+        }
+        return list;
+      }
+
+      function groupModelsByFamily(card) {
+        const list = getEffectiveModelsForCard(card);
+        const byFamily = new Map();
+        const groups = [];
+        for (const m of list) {
+          const fam = m.family || m.label || m.modelEnum;
+          let g = byFamily.get(fam);
+          if (!g) {
+            g = { family: fam, models: [] };
+            byFamily.set(fam, g);
+            groups.push(g);
+          }
+          g.models.push(m);
+        }
+        return groups;
+      }
+
+      function resolveSelectedModelEntry(card) {
+        const hState = card ? getHandoffState(card.id) : null;
+        const list = getEffectiveModelsForCard(card);
+        const wantedEnum =
+          (hState && hState.selectedModelEnum) ||
+          (card && card.modelEnum) ||
+          state.defaultModelEnum ||
+          (list[0] && list[0].modelEnum) ||
+          '';
+        if (!wantedEnum) return null;
+        const found = list.find((m) => m.modelEnum === wantedEnum);
+        if (found) return found;
+        return list[0] || null;
+      }
+
+      function getModelSyncKey(card) {
+        if (!card) return '';
+        const hState = state.handoffStateByConv.get(card.id);
+        const sel = (hState && hState.selectedModelEnum) || '';
+        const catKey = Array.isArray(state.availableModels)
+          ? state.availableModels.map((m) => m.modelEnum).join(',')
+          : '';
+        return [catKey, state.defaultModelEnum || '', card.modelEnum || '', card.modelLabel || '', sel].join('|');
+      }
+
+      function renderHandoffModelBarInner(card) {
+        const groups = groupModelsByFamily(card);
+        const selected = resolveSelectedModelEntry(card);
+        if (groups.length === 0 || !selected) {
+          return '<span class="handoff-model-label">Model: detecting available models...</span>';
+        }
+        const idEsc = escapeHtml(card.id);
+        const selectedGroup = groups.find((g) => g.family === selected.family) || groups[0];
+        let familyOpts = '';
+        for (const g of groups) {
+          const isSel = g.family === selectedGroup.family ? ' selected' : '';
+          familyOpts +=
+            '<option value="' + escapeHtml(g.family) + '"' + isSel + '>' +
+              escapeHtml(g.family) +
+            '</option>';
+        }
+
+        let html =
+          '<div class="handoff-model-group">' +
+            '<span class="handoff-model-label">Model</span>' +
+            '<select class="handoff-select handoff-family-select" data-conv-id="' + idEsc + '">' +
+              familyOpts +
+            '</select>' +
+          '</div>';
+
+        const hasTiers =
+          selectedGroup.models.length > 1 ||
+          Boolean(selectedGroup.models[0] && selectedGroup.models[0].tier);
+        if (hasTiers) {
+          let tierOpts = '';
+          for (const m of selectedGroup.models) {
+            const tierLabel = m.tier || 'Default';
+            const isSel = m.modelEnum === selected.modelEnum ? ' selected' : '';
+            tierOpts +=
+              '<option value="' + escapeHtml(m.modelEnum) + '"' + isSel + '>' +
+                escapeHtml(tierLabel) +
+              '</option>';
+          }
+          html +=
+            '<div class="handoff-model-group">' +
+              '<span class="handoff-model-label">Thinking</span>' +
+              '<select class="handoff-select handoff-tier-select" data-conv-id="' + idEsc + '">' +
+                tierOpts +
+              '</select>' +
+            '</div>';
+        }
+        return html;
       }
 
       function renderHandoffDrawer(card) {
@@ -1111,14 +1300,11 @@
         const idEsc = escapeHtml(card.id);
         let subtitleHtml = '';
         let placeholder = 'Optional instructions or focus for the AI handoff prompt (leave empty for full task handoff)...';
-        let rows = 8;
+        let rows = 6;
         let readonlyAttr = '';
         let buttonsHtml =
           '<button class="btn-solid" data-action="handoff-smart-run" data-id="' + idEsc + '">' +
             'Generate Handoff Prompt' +
-          '</button>' +
-          '<button class="ghost-btn" data-action="close-handoff" data-id="' + idEsc + '">' +
-            'Cancel' +
           '</button>';
 
         if (isPending) {
@@ -1139,21 +1325,20 @@
               'Review and edit AI handoff prompt before starting new chat' +
             '</div>';
           placeholder = 'Handoff prompt for the new conversation...';
-          rows = 10;
+          rows = 8;
           buttonsHtml =
             '<button class="btn-solid" data-action="handoff-start-chat" data-id="' + idEsc + '">' +
               'Start New Chat' +
             '</button>' +
             '<button class="btn-outline" data-action="handoff-copy" data-id="' + idEsc + '">' +
               'Copy' +
-            '</button>' +
-            '<button class="ghost-btn" data-action="handoff-reset" data-id="' + idEsc + '">' +
-              'Regenerate' +
-            '</button>' +
-            '<button class="ghost-btn" data-action="close-handoff" data-id="' + idEsc + '">' +
-              'Close' +
             '</button>';
         }
+
+        const modelBarHtml =
+          '<div class="handoff-model-bar" data-model-sync-key="' + escapeHtml(getModelSyncKey(card)) + '">' +
+            renderHandoffModelBarInner(card) +
+          '</div>';
 
         return (
           '<div class="drawer">' +
@@ -1167,6 +1352,7 @@
               readonlyAttr + '>' +
               escapeHtml(hState.text) +
             '</textarea>' +
+            modelBarHtml +
             '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
               buttonsHtml +
             '</div>' +
@@ -1177,6 +1363,8 @@
       function renderActiveCardHeader(card) {
         const tier = getCardTier(card);
         statusDotEl.className = 'dot ' + tier.dot;
+
+        const titleText = card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
 
         let gitStatusHtml = '';
         if (card.git && card.git.hasGit) {
@@ -1236,6 +1424,10 @@
           Boolean(state.pendingSmartHandoff && state.pendingSmartHandoff.convId === card.id);
 
         return (
+          '<div class="conv-row-top" data-action="open-chat" data-id="' + escapeHtml(card.id) + '" title="Switch to this conversation">' +
+            '<span class="conv-title">' + escapeHtml(titleText) + '</span>' +
+            '<span class="muted">' + escapeHtml(formatRelativeTime(card.lastActiveMs)) + '</span>' +
+          '</div>' +
           '<div class="status-row">' +
             '<div class="status-left">' +
               '<span class="tier-label ' + tier.text + '">' +
@@ -1390,6 +1582,13 @@
             }
             restoreScrollPositions(handoffSlot);
           }
+        } else if (handoffSlot && wantHandoff !== '0') {
+          const modelBar = handoffSlot.querySelector('.handoff-model-bar');
+          const nextSyncKey = getModelSyncKey(card);
+          if (modelBar && modelBar.getAttribute('data-model-sync-key') !== nextSyncKey) {
+            modelBar.setAttribute('data-model-sync-key', nextSyncKey);
+            modelBar.innerHTML = renderHandoffModelBarInner(card);
+          }
         }
 
         const detailsSlot = cardEl.querySelector('.card-details-slot');
@@ -1448,16 +1647,19 @@
 
       function getCardFocusMs(card) {
         if (!card) return 0;
-        return Math.max(Number(card.lastViewMs) || 0, Number(card.lastActiveMs) || 0);
+        return Math.max(Number(card.lastViewMs) || 0, Number(card.lastUserInputMs) || 0);
       }
 
       function pickMostRecentFocusCard(cards) {
         let best = null;
-        let bestMs = -1;
+        let bestFocusMs = -1;
+        let bestActiveMs = -1;
         for (const c of cards) {
-          const ms = getCardFocusMs(c);
-          if (ms > bestMs) {
-            bestMs = ms;
+          const focusMs = getCardFocusMs(c);
+          const activeMs = Number(c.lastActiveMs) || 0;
+          if (focusMs > bestFocusMs || (focusMs === bestFocusMs && activeMs > bestActiveMs)) {
+            bestFocusMs = focusMs;
+            bestActiveMs = activeMs;
             best = c;
           }
         }
@@ -1470,6 +1672,10 @@
           ? mainChats.filter((c) => c.workspaceKey === state.activeWorkspaceKey)
           : [];
 
+        if (initialHostConvId) {
+          state.hostConvId = initialHostConvId;
+        }
+
         const hostCard = state.hostConvId
           ? state.conversations.find((c) => c.id === state.hostConvId)
           : null;
@@ -1478,39 +1684,51 @@
           : (mainChats.length > 0 ? mainChats : state.conversations);
         const newestWsCard = pickMostRecentFocusCard(candidatePool);
 
-        const isManuallyPinned = Boolean(hostCard && state.manualPinId && state.manualPinId === hostCard.id);
-        const isInitialUnscopedHost = Boolean(
-          hostCard &&
-          initialHostConvId &&
-          hostCard.id === initialHostConvId &&
-          !hostCard.workspaceKey
-        );
-        const hostDifferentWs =
-          Boolean(state.activeWorkspaceKey) &&
-          Boolean(hostCard) &&
-          hostCard.workspaceKey !== state.activeWorkspaceKey &&
-          !isInitialUnscopedHost;
+        let pinnedCard = initialHostConvId ? hostCard : (hostCard || newestWsCard);
+        if (!initialHostConvId) {
+          const isManuallyPinned = Boolean(hostCard && state.manualPinId && state.manualPinId === hostCard.id);
+          const isPendingOnHost = Boolean(
+            hostCard && state.pendingSmartHandoff && state.pendingSmartHandoff.convId === hostCard.id
+          );
+          const manualPinRecent = Boolean(
+            state.manualPinId && (Date.now() - state.manualPinTs) < 15000
+          );
+          const hostDifferentWs =
+            Boolean(state.activeWorkspaceKey) &&
+            Boolean(hostCard) &&
+            hostCard.workspaceKey !== state.activeWorkspaceKey;
 
-        let pinnedCard = hostCard || newestWsCard;
-        if (hostCard && hostDifferentWs && !isManuallyPinned) {
-          pinnedCard = newestWsCard;
-          state.hostConvId = newestWsCard ? newestWsCard.id : '';
-        } else if (hostCard && newestWsCard && newestWsCard.id !== hostCard.id) {
-          const newestTs = getCardFocusMs(newestWsCard);
-          const hostTs = getCardFocusMs(hostCard);
-          const newActivityAfterManualPin =
-            !state.manualPinId || newestTs > state.manualPinTs;
-
-          if (newestTs > hostTs && newActivityAfterManualPin) {
+          if (isPendingOnHost) {
+            pinnedCard = hostCard;
+          } else if (hostCard && hostDifferentWs && !isManuallyPinned) {
             pinnedCard = newestWsCard;
+            state.hostConvId = newestWsCard ? newestWsCard.id : '';
+          } else if (hostCard && newestWsCard && newestWsCard.id !== hostCard.id) {
+            const newestTs = getCardFocusMs(newestWsCard);
+            const hostTs = getCardFocusMs(hostCard);
+            const newActivityAfterManualPin =
+              !state.manualPinId || newestTs > state.manualPinTs;
+
+            if (newestTs > hostTs && newActivityAfterManualPin) {
+              pinnedCard = newestWsCard;
+              state.hostConvId = newestWsCard.id;
+              state.manualPinId = '';
+            }
+          } else if (!hostCard && newestWsCard && !manualPinRecent) {
             state.hostConvId = newestWsCard.id;
-            state.manualPinId = '';
           }
-        } else if (!hostCard && newestWsCard) {
-          state.hostConvId = newestWsCard.id;
         }
 
         const pinnedId = pinnedCard ? pinnedCard.id : '';
+        if (state.lastPinnedId && pinnedId && state.lastPinnedId !== pinnedId) {
+          const isOldPending = Boolean(
+            state.pendingSmartHandoff && state.pendingSmartHandoff.convId === state.lastPinnedId
+          );
+          if (state.openHandoffId === state.lastPinnedId && !isOldPending) {
+            state.openHandoffId = null;
+          }
+        }
+        state.lastPinnedId = pinnedId;
 
         if (pinnedCard) {
           let activeCardEl = pinnedContainer.querySelector('.active-card');
@@ -1654,6 +1872,12 @@
           state.activeWorkspaceKey = data.activeWorkspaceKey || '';
           state.workspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
           state.archivedProjects = Array.isArray(data.archivedProjects) ? data.archivedProjects : [];
+          if (Array.isArray(data.availableModels) && data.availableModels.length > 0) {
+            state.availableModels = data.availableModels;
+          }
+          if (data.defaultModelEnum) {
+            state.defaultModelEnum = data.defaultModelEnum;
+          }
           state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
           state.searchMatches = data.searchMatches || null;
 
@@ -1663,7 +1887,35 @@
           console.error('[ContextHealth] status poll failed:', err);
         } finally {
           state.pollInFlight = false;
+          state.lastPollDoneMs = Date.now();
         }
+      }
+
+      async function ensureModelsLoaded(convId, forceRefresh = false) {
+        try {
+          const qs = new URLSearchParams();
+          if (convId) qs.set('convId', convId);
+          if (forceRefresh) qs.set('refresh', '1');
+          const res = await apiFetch('/api/models?' + qs.toString());
+          if (!res.ok) return;
+          const data = await res.json();
+          if (Array.isArray(data.models) && data.models.length > 0) {
+            state.availableModels = data.models;
+          }
+          if (data.defaultModelEnum) {
+            state.defaultModelEnum = data.defaultModelEnum;
+          }
+          if (convId && data.convModelEnum) {
+            const card = state.conversations.find((c) => c.id === convId);
+            if (card) {
+              card.modelEnum = data.convModelEnum;
+              if (data.convModelLabel) {
+                card.modelLabel = data.convModelLabel;
+              }
+            }
+          }
+          renderAll();
+        } catch {}
       }
 
       async function refreshOpenDetailsDrawers() {
@@ -1724,14 +1976,8 @@
         return { data, focus };
       }
 
-      let smartHandoffPollTimer = null;
-
       function cancelPendingSmartHandoff() {
         state.pendingSmartHandoff = null;
-        if (smartHandoffPollTimer) {
-          clearInterval(smartHandoffPollTimer);
-          smartHandoffPollTimer = null;
-        }
         renderAll();
       }
 
@@ -1774,9 +2020,7 @@
 
       async function handleSmartHandoffRun(convId) {
         const card = state.conversations.find((c) => c.id === convId);
-        const hState = getHandoffState(convId);
         const focus = readCurrentHandoffText(convId).trim();
-        hState.focusUsed = focus;
         state.openHandoffId = convId;
 
         try {
@@ -1785,24 +2029,18 @@
           if (window.sidecar && window.sidecar.agent && typeof window.sidecar.agent.sendMessage === 'function') {
             state.pendingSmartHandoff = {
               convId,
-              baselineHandoffMs: (card && card.latestHandoffMs) || 0,
-              baselinePromptText: (card && card.latestHandoffPrompt) || '',
+              baselineHandoffMs: Math.max((card && card.latestHandoffMs) || 0, data.latestHandoffMs || 0),
+              baselinePromptText: data.latestHandoffPrompt || (card && card.latestHandoffPrompt) || '',
               requestedAtMs: Date.now(),
               completing: false
             };
             renderAll();
-
-            if (smartHandoffPollTimer) clearInterval(smartHandoffPollTimer);
-            smartHandoffPollTimer = setInterval(() => {
-              fetchStatus(false);
-            }, 1200);
 
             try {
               const res = await window.sidecar.agent.sendMessage(data.promptForAgentHandoff, convId);
               if (res && res.error) {
                 throw new Error(res.error);
               }
-              openConversationInHost(convId);
               showToast('Agent is drafting smart handoff...');
               return;
             } catch (agentErr) {
@@ -1828,24 +2066,59 @@
           return;
         }
 
-        if (window.sidecar && window.sidecar.agent && typeof window.sidecar.agent.startConversation === 'function') {
-          try {
-            const res = await window.sidecar.agent.startConversation(promptText);
-            if (res && res.error) {
-              throw new Error(res.error);
-            }
-            showToast('Started new conversation with handoff!');
-            return;
-          } catch (chatErr) {
-            console.warn('[ContextHealth] agent startConversation failed, falling back to clipboard:', chatErr);
-            await copyTextToClipboard(promptText);
-            showToast('Could not start chat automatically; copied prompt to clipboard');
-            return;
+        const card = state.conversations.find((c) => c.id === convId);
+        const selectedModel = resolveSelectedModelEntry(card);
+        try {
+          const httpRes = await apiFetch('/_sidecar/new-conversation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              message: promptText,
+              conversationId: convId,
+              projectId: (card && card.projectId) || '',
+              workspacePath: (card && card.workspacePath) || '',
+              model: (selectedModel && selectedModel.modelEnum) || (card && card.modelEnum) || '',
+              modelId: (selectedModel && selectedModel.modelId) || ''
+            })
+          });
+          const res = await httpRes.json().catch(() => ({}));
+          if (!httpRes.ok || (res && res.error)) {
+            throw new Error((res && res.error) || 'Failed to start conversation');
           }
+          const rawUuidMatch =
+            res && typeof res.raw === 'string'
+              ? /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(res.raw)
+              : null;
+          const newConvId = (
+            (res && (res.conversationId || res.conversation_id)) ||
+            (res && res.response && (res.response.conversationId || res.response.conversation_id)) ||
+            (rawUuidMatch ? rawUuidMatch[1] : '') ||
+            ''
+          ).trim().toLowerCase();
+          state.openHandoffId = null;
+          state.handoffStateByConv.delete(convId);
+          if (newConvId) {
+            if (!initialHostConvId) {
+              state.hostConvId = newConvId;
+              state.manualPinId = newConvId;
+              state.manualPinTs = Date.now();
+            }
+            openConversationInHost(newConvId);
+          } else if (!initialHostConvId) {
+            state.manualPinId = '';
+            state.manualPinTs = 0;
+          }
+          await fetchStatus(true);
+          showToast('Started new conversation with handoff!');
+          setTimeout(() => { if (!isIframeHidden()) fetchStatus(true); }, 800);
+          setTimeout(() => { if (!isIframeHidden()) fetchStatus(true); }, 2200);
+          return;
+        } catch (chatErr) {
+          console.warn('[ContextHealth] startConversation failed, falling back to clipboard:', chatErr);
+          await copyTextToClipboard(promptText);
+          showToast('Could not start chat automatically; copied prompt to clipboard');
+          return;
         }
-
-        await copyTextToClipboard(promptText);
-        showToast('Copied handoff prompt to clipboard (paste in new chat)');
       }
 
       async function handleCopyHandoffText(convId) {
@@ -1856,14 +2129,6 @@
         }
         await copyTextToClipboard(promptText);
         showToast('Copied handoff prompt');
-      }
-
-      function handleResetHandoff(convId) {
-        const hState = getHandoffState(convId);
-        hState.step = 'focus';
-        hState.text = hState.focusUsed || '';
-        state.scrollPositions.set(convId + ':handoff', 0);
-        renderAll();
       }
 
       function closeModal() {
@@ -1965,7 +2230,7 @@
         }
       });
 
-      document.addEventListener('click', (e) => {
+      document.addEventListener('click', async (e) => {
         if (modalBackdropEl && e.target === modalBackdropEl) {
           closeModal();
           return;
@@ -2017,11 +2282,13 @@
         }
 
         if (action === 'open-chat' && convId) {
-          const targetCard = state.conversations.find((c) => c.id === convId);
-          state.hostConvId = convId;
-          state.manualPinId = convId;
-          state.manualPinTs = Math.max(getCardFocusMs(targetCard), Date.now());
-          renderAll();
+          if (!initialHostConvId) {
+            const targetCard = state.conversations.find((c) => c.id === convId);
+            state.hostConvId = convId;
+            state.manualPinId = convId;
+            state.manualPinTs = Math.max(getCardFocusMs(targetCard), Date.now());
+            renderAll();
+          }
           openConversationInHost(convId);
         } else if (action === 'toggle-details' && convId) {
           toggleDetails(convId);
@@ -2031,12 +2298,18 @@
             state.openHandoffId = null;
             renderAll();
           } else {
-            state.openHandoffId = state.openHandoffId === convId ? null : convId;
+            const onPinnedCard = Boolean(actionBtn.closest('#pinned-container'));
+            if (onPinnedCard && (Date.now() - state.lastPollDoneMs) > 250) {
+              await fetchStatus(false);
+            }
+            const targetConvId = onPinnedCard && state.lastPinnedId ? state.lastPinnedId : convId;
+            const opening = state.openHandoffId !== targetConvId;
+            state.openHandoffId = opening ? targetConvId : null;
             renderAll();
+            if (opening) {
+              ensureModelsLoaded(targetConvId, false);
+            }
           }
-        } else if (action === 'close-handoff') {
-          state.openHandoffId = null;
-          renderAll();
         } else if (action === 'cancel-pending-handoff') {
           cancelPendingSmartHandoff();
         } else if (action === 'handoff-smart-run' && convId) {
@@ -2045,8 +2318,6 @@
           handleStartNewChatFromHandoff(convId);
         } else if (action === 'handoff-copy' && convId) {
           handleCopyHandoffText(convId);
-        } else if (action === 'handoff-reset' && convId) {
-          handleResetHandoff(convId);
         } else if (action === 'toggle-clamp') {
           const el = actionBtn.previousElementSibling;
           if (el) {
@@ -2061,11 +2332,49 @@
         }
       });
 
+      document.addEventListener('change', (e) => {
+        const target = e.target;
+        if (!target || !target.classList) return;
+        const convId = target.getAttribute('data-conv-id');
+        if (!convId) return;
+        const card = state.conversations.find((c) => c.id === convId);
+        const hState = getHandoffState(convId);
+
+        if (target.classList.contains('handoff-family-select')) {
+          const chosenFamily = target.value;
+          const groups = groupModelsByFamily(card);
+          const grp = groups.find((g) => g.family === chosenFamily);
+          if (grp && grp.models.length > 0) {
+            const prevSelected = resolveSelectedModelEntry(card);
+            const prevTier = (prevSelected && prevSelected.tier) ? prevSelected.tier.toLowerCase() : '';
+            const sameTier = prevTier
+              ? grp.models.find((m) => (m.tier || '').toLowerCase() === prevTier)
+              : null;
+            const nextModel = sameTier || grp.models[0];
+            hState.selectedModelEnum = nextModel.modelEnum;
+            renderAll();
+          }
+        } else if (target.classList.contains('handoff-tier-select')) {
+          hState.selectedModelEnum = target.value;
+          renderAll();
+        }
+      });
+
       document.addEventListener('input', (e) => {
         if (e.target && e.target.hasAttribute('data-focus-conv')) {
           const convId = e.target.getAttribute('data-focus-conv');
           const hState = getHandoffState(convId);
           hState.text = e.target.value;
+          if (hState.step === 'ready' && e.target.value.trim() === '') {
+            hState.step = 'focus';
+            hState.text = '';
+            state.scrollPositions.set(convId + ':handoff', 0);
+            renderAll();
+            const nextTa = document.querySelector('textarea.handoff-input[data-focus-conv="' + convId + '"]');
+            if (nextTa) {
+              nextTa.focus();
+            }
+          }
         }
       });
 
@@ -2127,20 +2436,52 @@
           } catch {}
         }
         await fetchStatus(true);
+        await ensureModelsLoaded(state.hostConvId, true);
         await refreshOpenDetailsDrawers();
         showToast('Refreshed');
       });
 
+      function isIframeHidden() {
+        return Boolean(document.hidden || (window.innerWidth === 0 && window.innerHeight === 0));
+      }
+
+      let wasIframeHidden = isIframeHidden();
+
+      window.addEventListener('resize', () => {
+        const nowHidden = isIframeHidden();
+        if (!wasIframeHidden && nowHidden) {
+          if (state.openHandoffId && !state.pendingSmartHandoff) {
+            state.openHandoffId = null;
+            renderAll();
+          }
+        } else if (wasIframeHidden && !nowHidden) {
+          fetchStatus(false);
+        }
+        wasIframeHidden = nowHidden;
+      });
+
       if (window.sidecar && typeof window.sidecar.onWorkspaceChange === 'function') {
         window.sidecar.onWorkspaceChange((uris) => {
-          if (updateWorkspaceUris(uris)) {
+          if (updateWorkspaceUris(uris) || (Date.now() - state.lastPollDoneMs) > 300) {
             fetchStatus(false);
           }
         });
       }
 
       document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) {
+        if (!isIframeHidden()) {
+          fetchStatus(false);
+        }
+      });
+
+      window.addEventListener('focus', () => {
+        if (!isIframeHidden()) {
+          fetchStatus(false);
+        }
+      });
+
+      document.addEventListener('pointerenter', () => {
+        if (!isIframeHidden() && (Date.now() - state.lastPollDoneMs) > 400) {
           fetchStatus(false);
         }
       });
@@ -2155,13 +2496,14 @@
           } catch {}
         }
         await fetchStatus(true);
+        void ensureModelsLoaded(state.hostConvId, false);
       })();
 
       setInterval(() => {
-        if (!document.hidden) {
+        if (!isIframeHidden() || Boolean(state.pendingSmartHandoff)) {
           fetchStatus(false);
         }
-      }, 3000);
+      }, 1500);
     })();
   </script>
 </body>

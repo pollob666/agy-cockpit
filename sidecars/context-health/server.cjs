@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
-const { fileURLToPath } = require('node:url');
+const { fileURLToPath, pathToFileURL } = require('node:url');
 
 const BIND_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8091;
@@ -81,10 +81,18 @@ const FALLBACK_PRELOAD_JS = `(function() {
         }
         return data;
       },
-      async startConversation(message) {
+      async startConversation(message, opts = {}) {
+        const payload = { message };
+        if (opts && typeof opts === 'object') {
+          if (opts.model) payload.model = opts.model;
+          if (opts.modelId) payload.modelId = opts.modelId;
+          if (opts.conversationId) payload.conversationId = opts.conversationId;
+          if (opts.projectId) payload.projectId = opts.projectId;
+          if (opts.workspacePath) payload.workspacePath = opts.workspacePath;
+        }
         const res = await secureFetch('/_sidecar/new-conversation', {
           method: 'POST',
-          body: JSON.stringify({ message })
+          body: JSON.stringify(payload)
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || (data && data.error)) {
@@ -385,6 +393,7 @@ function createEmptyEntry(convId) {
     parsedBytes: 0,
     lastActiveIso: '',
     lastActiveMs: 0,
+    lastUserInputMs: 0,
     lastViewMs: 0,
     archived: false,
     isSubagent: false,
@@ -416,6 +425,9 @@ function createEmptyEntry(convId) {
     checkpointTargetStepIndex: -1,
     needsFullCheckpointRead: false,
     checkpointOverview: '',
+    modelEnum: '',
+    modelLabel: '',
+    modelResolvedMtimeMs: 0,
     prompts: [],
     mentionedCommits: []
   };
@@ -487,15 +499,18 @@ function processTranscriptLine(entry, line, isFirstLine) {
   }
 
   if (type === 'USER_INPUT') {
-    if (createdAt && createdMs >= entry.lastActiveMs) {
-      entry.lastActiveIso = createdAt;
-      entry.lastActiveMs = createdMs;
-    }
     const clean = cleanUserPrompt(content);
     if (clean) {
       if (clean.startsWith('[Context Health Smart Handoff]')) {
         entry.awaitingHandoffResponse = true;
         return false;
+      }
+      if (createdAt && createdMs >= entry.lastActiveMs) {
+        entry.lastActiveIso = createdAt;
+        entry.lastActiveMs = createdMs;
+      }
+      if (!entry.isSubagent && obj.source !== 'SYSTEM' && createdMs >= (entry.lastUserInputMs || 0)) {
+        entry.lastUserInputMs = createdMs;
       }
       entry.awaitingHandoffResponse = false;
       entry.needsFullHandoffRead = false;
@@ -548,7 +563,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
       const handoffMatch = /<HANDOFF_PROMPT>\s*([\s\S]*?)\s*<\/HANDOFF_PROMPT>/i.exec(trimmedContent);
       if (handoffMatch && handoffMatch[1].trim() && !isTruncatedContent) {
         entry.latestHandoffPrompt = handoffMatch[1].trim();
-        entry.latestHandoffMs = createdMs || Date.now();
+        entry.latestHandoffMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
         entry.awaitingHandoffResponse = false;
         entry.needsFullHandoffRead = false;
         entry.handoffTargetStepIndex = -1;
@@ -559,14 +574,14 @@ function processTranscriptLine(entry, line, isFirstLine) {
       ) {
         entry.needsFullHandoffRead = true;
         entry.handoffTargetStepIndex = typeof obj.step_index === 'number' ? obj.step_index : -1;
-        entry.handoffPendingMs = createdMs || Date.now();
+        entry.handoffPendingMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
         entry.awaitingHandoffResponse = false;
       } else if (
         entry.awaitingHandoffResponse &&
         (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)
       ) {
         entry.latestHandoffPrompt = trimmedContent;
-        entry.latestHandoffMs = createdMs || Date.now();
+        entry.latestHandoffMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
         entry.awaitingHandoffResponse = false;
         entry.needsFullHandoffRead = false;
         entry.handoffTargetStepIndex = -1;
@@ -709,7 +724,7 @@ function extractTitleFromPbtxt(raw) {
 function extractAnnotationFromPbtxt(raw) {
   if (!raw || typeof raw !== 'string') return { title: '', lastViewMs: 0, archived: false };
   const title = extractTitleFromPbtxt(raw);
-  const viewMatch = /\blast_user_view_time\s*:\s*\{\s*seconds\s*:\s*(\d+)(?:\s+nanos\s*:\s*(\d+))?\s*\}/.exec(raw);
+  const viewMatch = /\blast_user_view_time\s*:?\s*\{\s*seconds\s*:\s*(\d+)(?:\s+nanos\s*:\s*(\d+))?\s*\}/.exec(raw);
   let lastViewMs = 0;
   if (viewMatch) {
     const sec = parseInt(viewMatch[1], 10) || 0;
@@ -858,7 +873,7 @@ function resolveFullHandoffPrompt(entry, transcriptPath) {
   }
 
   if (found) {
-    entry.latestHandoffMs = entry.handoffPendingMs || Date.now();
+    entry.latestHandoffMs = Math.max(entry.handoffPendingMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
     entry.needsFullHandoffRead = false;
     entry.handoffTargetStepIndex = -1;
     return true;
@@ -901,6 +916,14 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
     stat.size - existingEntry.parsedBytes < 16 * 1024 * 1024;
 
   const entry = canIncremental ? existingEntry : createEmptyEntry(convId);
+  if (!canIncremental && existingEntry) {
+    entry.modelEnum = existingEntry.modelEnum || '';
+    entry.modelLabel = existingEntry.modelLabel || '';
+    entry.modelResolvedMtimeMs = existingEntry.modelResolvedMtimeMs || 0;
+    entry.workspacePath = existingEntry.workspacePath || '';
+    entry.lastViewMs = existingEntry.lastViewMs || 0;
+    entry.lastUserInputMs = existingEntry.lastUserInputMs || 0;
+  }
   const startOffset = canIncremental ? entry.parsedBytes : 0;
   const bytesToRead = stat.size - startOffset;
 
@@ -968,6 +991,13 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
   entry.parsedBytes = lastNewlineIdx >= 0 ? startOffset + lastNewlineIdx + 1 : stat.size;
   entry.size = stat.size;
   entry.mtimeMs = stat.mtimeMs;
+  if (
+    entry.lastUserInputMs > 0 &&
+    stat.mtimeMs > entry.lastUserInputMs &&
+    stat.mtimeMs - entry.lastUserInputMs < 1000
+  ) {
+    entry.lastUserInputMs = Math.floor(stat.mtimeMs);
+  }
   if (!entry.lastActiveMs) {
     entry.lastActiveMs = stat.mtimeMs;
     entry.lastActiveIso = new Date(stat.mtimeMs).toISOString();
@@ -1271,15 +1301,16 @@ function resolveAgentApiCommand(appDataDir) {
   return { file: 'agentapi', prefix: [], shell: false };
 }
 
-function execAgentApi(args, projectId, appDataDir, timeoutMs = 12000) {
+function execAgentApi(args, projectId, appDataDir, workspacePath = '', timeoutMs = 12000) {
   return new Promise((resolve) => {
     const env = { ...process.env };
     if (projectId) env.ANTIGRAVITY_PROJECT_ID = projectId;
+    const cwd = workspacePath && isDirectory(workspacePath) ? workspacePath : os.homedir();
     const { file, prefix, shell } = resolveAgentApiCommand(appDataDir);
     execFile(
       file,
       [...prefix, ...args],
-      { encoding: 'utf-8', env, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, shell },
+      { encoding: 'utf-8', env, cwd, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, shell },
       (err, stdout, stderr) => {
         if (err) {
           const errMsg = stderr ? `${err.message}: ${stderr}` : err.message;
@@ -1300,6 +1331,172 @@ function execAgentApi(args, projectId, appDataDir, timeoutMs = 12000) {
       }
     );
   });
+}
+
+function callLanguageServerRpc(method, payload = {}, timeoutMs = 4000) {
+  const rawAddr = (process.env.ANTIGRAVITY_LS_ADDRESS || '').trim();
+  const csrf = (process.env.ANTIGRAVITY_CSRF_TOKEN || '').trim();
+  if (!rawAddr || !csrf) {
+    return Promise.resolve({ error: 'Missing ANTIGRAVITY_LS_ADDRESS or ANTIGRAVITY_CSRF_TOKEN' });
+  }
+  const baseUrl = /^https?:\/\//i.test(rawAddr) ? rawAddr : `http://${rawAddr}`;
+  let urlObj;
+  try {
+    urlObj = new URL(`/exa.language_server_pb.LanguageServerService/${method}`, baseUrl);
+  } catch (err) {
+    return Promise.resolve({ error: err.message });
+  }
+  const bodyBuf = Buffer.from(JSON.stringify(payload || {}), 'utf-8');
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        hostname: urlObj.hostname === 'localhost' ? '127.0.0.1' : urlObj.hostname,
+        port: urlObj.port,
+        path: urlObj.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Connect-Protocol-Version': '1',
+          'x-codeium-csrf-token': csrf,
+          'Content-Length': bodyBuf.length
+        },
+        timeout: timeoutMs
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const raw = Buffer.concat(chunks).toString('utf-8').trim();
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            resolve({ error: `HTTP ${res.statusCode}: ${raw.slice(0, 300)}`, statusCode: res.statusCode });
+            return;
+          }
+          if (!raw) {
+            resolve({});
+            return;
+          }
+          try {
+            resolve(JSON.parse(raw));
+          } catch {
+            resolve({ error: 'Invalid JSON response from Language Server' });
+          }
+        });
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ error: `Language Server RPC ${method} timed out` });
+    });
+    req.on('error', (err) => {
+      resolve({ error: err.message });
+    });
+    req.write(bodyBuf);
+    req.end();
+  });
+}
+
+function parseModelFamilyAndTier(label) {
+  const clean = (typeof label === 'string' ? label : '').trim();
+  const m = /^(.*?)\s*\(([^()]+)\)$/.exec(clean);
+  if (m && m[1].trim()) {
+    return { family: m[1].trim(), tier: m[2].trim() };
+  }
+  return { family: clean, tier: '' };
+}
+
+function getTierSortWeight(tier) {
+  const t = (tier || '').trim().toLowerCase();
+  if (!t) return 0;
+  if (t === 'max' || t === 'extra high' || t === 'ultra') return 10;
+  if (t === 'high') return 20;
+  if (t === 'thinking') return 25;
+  if (t === 'medium') return 30;
+  if (t === 'low thinking') return 40;
+  if (t === 'low') return 50;
+  if (t === 'extra low' || t === 'minimal') return 60;
+  return 35;
+}
+
+function parseCascadeModelConfigs(data) {
+  if (!data || typeof data !== 'object' || data.error) {
+    return { models: [], defaultModelEnum: '' };
+  }
+  const defaultModelEnum =
+    (data.defaultOverrideModelConfig &&
+      data.defaultOverrideModelConfig.modelOrAlias &&
+      (data.defaultOverrideModelConfig.modelOrAlias.model ||
+        data.defaultOverrideModelConfig.modelOrAlias.alias)) ||
+    '';
+
+  const recommendedLabelOrder = new Map();
+  const recommendedFamilyOrder = new Map();
+  const sorts = Array.isArray(data.clientModelSorts) ? data.clientModelSorts : [];
+  for (const s of sorts) {
+    const groups = Array.isArray(s && s.groups) ? s.groups : [];
+    for (const g of groups) {
+      const labels = Array.isArray(g && g.modelLabels) ? g.modelLabels : [];
+      for (const lbl of labels) {
+        if (typeof lbl === 'string' && lbl.trim()) {
+          const cleanLbl = lbl.trim();
+          if (!recommendedLabelOrder.has(cleanLbl)) {
+            recommendedLabelOrder.set(cleanLbl, recommendedLabelOrder.size);
+          }
+          const { family } = parseModelFamilyAndTier(cleanLbl);
+          if (family && !recommendedFamilyOrder.has(family)) {
+            recommendedFamilyOrder.set(family, recommendedFamilyOrder.size);
+          }
+        }
+      }
+    }
+  }
+
+  const rawConfigs = Array.isArray(data.clientModelConfigs) ? data.clientModelConfigs : [];
+  const seenEnums = new Set();
+  const models = [];
+
+  for (const cfg of rawConfigs) {
+    if (!cfg || cfg.disabled) continue;
+    const label = typeof cfg.label === 'string' ? cfg.label.trim() : '';
+    const modelEnum =
+      (cfg.modelOrAlias && (cfg.modelOrAlias.model || cfg.modelOrAlias.alias)) || '';
+    if (!label || !modelEnum || modelEnum === 'MODEL_UNSPECIFIED') continue;
+    if (seenEnums.has(modelEnum)) continue;
+    seenEnums.add(modelEnum);
+
+    const { family, tier } = parseModelFamilyAndTier(label);
+    const recommended =
+      recommendedFamilyOrder.has(family) ||
+      recommendedLabelOrder.has(label) ||
+      Boolean(cfg.isRecommended);
+
+    models.push({
+      label,
+      modelEnum,
+      modelId: typeof cfg.modelId === 'string' ? cfg.modelId.trim() : '',
+      family,
+      tier,
+      recommended,
+      tagTitle: typeof cfg.tagTitle === 'string' ? cfg.tagTitle.trim() : ''
+    });
+  }
+
+  models.sort((a, b) => {
+    const aFamRec = recommendedFamilyOrder.has(a.family) ? recommendedFamilyOrder.get(a.family) : 9999;
+    const bFamRec = recommendedFamilyOrder.has(b.family) ? recommendedFamilyOrder.get(b.family) : 9999;
+    if (aFamRec !== bFamRec) return aFamRec - bFamRec;
+
+    if (a.family !== b.family) {
+      if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
+      return a.family.localeCompare(b.family, undefined, { numeric: true, sensitivity: 'base' });
+    }
+
+    const aWeight = getTierSortWeight(a.tier);
+    const bWeight = getTierSortWeight(b.tier);
+    if (aWeight !== bWeight) return aWeight - bWeight;
+    return a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' });
+  });
+
+  return { models, defaultModelEnum };
 }
 
 function rewriteUiHtmlLinks(html, token, conversationId) {
@@ -1328,21 +1525,23 @@ function rewriteUiHtmlLinks(html, token, conversationId) {
 
 function buildAgentHandoffRequest(entry, focusTopic) {
   const focusDirective = focusTopic
-    ? `User focus / instructions for the new conversation:\n"${focusTopic}"\nTailor the handoff prompt so it focuses strictly on what the user requested above, including all relevant technical context, trade-offs, and our latest discussion.`
-    : `Summarize the current task, what has been completed, our latest technical analysis or discussion, and the immediate next step.`;
+    ? `User focus / instructions / reply for the new conversation:\n"${focusTopic}"\nNote: The user may have written this as a direct reply, approval, or refinement to your very last message in this chat (instead of replying here) so that the next step runs in a fresh conversation. Scope the handoff prompt STRICTLY to executing or continuing what the user requested above, combined with the directly relevant technical context from our latest discussion.`
+    : `Scope the handoff prompt strictly to the active, unfinished task or immediate next step from the latest turns of our conversation.`;
 
   return (
     `[Context Health Smart Handoff]\n` +
-    `Create a self-contained handoff prompt so we can continue seamlessly in a fresh conversation.\n\n` +
+    `Create a self-contained, high-signal handoff prompt so we can continue seamlessly in a fresh conversation.\n\n` +
     `${focusDirective}\n\n` +
     `STRICT RULES:\n` +
     `1. Do NOT call any tools (no read_file, no run_command, no search). You already have all required context in memory. Respond immediately.\n` +
-    `2. Write the entire handoff prompt in the SAME language the user has been using in this conversation (or in the focus instructions above).\n` +
+    `2. Write the entire handoff prompt in the SAME language the user has been using in this conversation (unless the user explicitly requested a different language above).\n` +
     `3. Wrap the final handoff prompt strictly inside <HANDOFF_PROMPT> and </HANDOFF_PROMPT> tags. As soon as you finish your response, the Context Health sidecar will automatically extract the content inside those tags and load it into the review editor.\n` +
-    `4. Inside <HANDOFF_PROMPT>...</HANDOFF_PROMPT> include:\n` +
-    `   - On the very first line, a clear instruction (in the user's language) stating that all necessary context is provided below and the new agent must NOT search or read transcript.jsonl files from previous conversations.\n` +
-    `   - The Workspace (${entry.workspacePath || 'current workspace'}) and the key files involved.\n` +
-    `   - A concise summary of what has been done so far, plus our latest technical analysis, options, or open questions.\n` +
+    `4. Ignore any earlier <HANDOFF_PROMPT> blocks that may exist higher up in this conversation's history. Do NOT copy or carry over old sections from them; write a fresh, tightly scoped prompt for the current target task.\n` +
+    `5. Maximize signal-to-noise ratio. Do NOT write a session changelog or historical summary of unrelated tasks that were already completed earlier in this conversation (the files on disk already reflect completed changes). Mention prior work ONLY if it is partially finished, uncommitted in a way that affects the next step, or has a direct technical dependency or side-effect on the immediate task.\n` +
+    `6. Inside <HANDOFF_PROMPT>...</HANDOFF_PROMPT> include ONLY:\n` +
+    `   - On the very first line, a clear instruction (in the target language) stating that all necessary context is provided below and the new agent must NOT search or read transcript.jsonl files from previous conversations.\n` +
+    `   - The Workspace (${entry.workspacePath || 'current workspace'}) and ONLY the specific files (with exact function/symbol names and approximate line ranges when known) that the new agent will actually need to read or modify for this task.\n` +
+    `   - The exact technical context, agreed design decisions, constraints, edge cases, and concrete action items required to execute the immediate task right away.\n` +
     `   - Do NOT include the old conversationId UUID.`
   );
 }
@@ -1399,6 +1598,12 @@ class ContextHealthServer {
     this.indexCacheDirty = false;
     this.server = null;
 
+    this.cachedModelsCatalog = { models: [], defaultModelEnum: '', fetchedAtMs: 0 };
+    this.modelsFetchPromise = null;
+    this.modelResolveInFlight = new Set();
+    this.modelResolveCooldown = new Map();
+    this.modelsCatalogRev = 1;
+
     this.indexCachePath = path.join(this.dataDir, 'index_cache.json');
     this.metadataCachePath = path.join(this.dataDir, 'metadata_cache.json');
     this.serverInfoPath = path.join(this.dataDir, 'server_info.json');
@@ -1420,6 +1625,8 @@ class ContextHealthServer {
           for (const [k, v] of Object.entries(raw)) {
             if (typeof v === 'string' && v) {
               this.metadataWorkspaceCache.set(k, resolveCanonicalWorkspace(v));
+            } else if (v && typeof v === 'object' && typeof v.workspacePath === 'string' && v.workspacePath) {
+              this.metadataWorkspaceCache.set(k, resolveCanonicalWorkspace(v.workspacePath));
             }
           }
         }
@@ -1429,9 +1636,13 @@ class ContextHealthServer {
     if (isFile(this.indexCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.indexCachePath, 'utf-8'));
-        if (raw && raw.version === 11 && Array.isArray(raw.entries)) {
+        if (raw && raw.version === 12 && Array.isArray(raw.entries)) {
           for (const item of raw.entries) {
             if (item && typeof item.id === 'string') {
+              item.lastUserInputMs = item.lastUserInputMs || 0;
+              item.modelEnum = item.modelEnum || '';
+              item.modelLabel = item.modelLabel || '';
+              item.modelResolvedMtimeMs = item.modelResolvedMtimeMs || 0;
               rebuildSearchCorpus(item);
               this.convCache.set(item.id, item);
             }
@@ -1449,7 +1660,7 @@ class ContextHealthServer {
     this.indexCacheDirty = false;
     try {
       const entries = [...this.convCache.values()];
-      writeJsonAtomic(this.indexCachePath, { version: 11, savedAt: Date.now(), entries });
+      writeJsonAtomic(this.indexCachePath, { version: 12, savedAt: Date.now(), entries });
     } catch {}
   }
 
@@ -1487,7 +1698,7 @@ class ContextHealthServer {
   resolveConversationAnnotation(convId, forceStat = false) {
     const now = Date.now();
     const cached = this.annotationTitleCache.get(convId);
-    if (!forceStat && cached && now - cached.checkedAtMs < 5000) {
+    if (!forceStat && cached && now - cached.checkedAtMs < 1000) {
       return cached;
     }
 
@@ -1525,24 +1736,29 @@ class ContextHealthServer {
 
   applyEntryMetadata(entry, convId, activeConvId = '', activeWorkspaceNorm = '', forceAnnot = false) {
     let changed = false;
-    const annot = this.resolveConversationAnnotation(convId, forceAnnot);
-    if (annot.title && entry.title !== annot.title) {
-      entry.title = annot.title;
-      rebuildSearchCorpus(entry);
-      changed = true;
-    }
-    if (annot.lastViewMs && entry.lastViewMs !== annot.lastViewMs) {
-      entry.lastViewMs = annot.lastViewMs;
-      changed = true;
-    }
-    const nextArchived = Boolean(annot.archived);
-    if (Boolean(entry.archived) !== nextArchived) {
-      entry.archived = nextArchived;
-      changed = true;
+    if (!entry.isSubagent) {
+      const annot = this.resolveConversationAnnotation(convId, forceAnnot);
+      if (annot.title && entry.title !== annot.title) {
+        entry.title = annot.title;
+        rebuildSearchCorpus(entry);
+        changed = true;
+      }
+      if (annot.lastViewMs && annot.lastViewMs > (entry.lastViewMs || 0)) {
+        entry.lastViewMs = annot.lastViewMs;
+        changed = true;
+      }
+      const nextArchived = Boolean(annot.archived);
+      if (Boolean(entry.archived) !== nextArchived) {
+        entry.archived = nextArchived;
+        changed = true;
+      }
     }
     if (!entry.workspacePath && this.metadataWorkspaceCache.has(convId)) {
-      entry.workspacePath = this.metadataWorkspaceCache.get(convId);
-      changed = true;
+      const cachedWs = this.metadataWorkspaceCache.get(convId);
+      if (typeof cachedWs === 'string' && cachedWs) {
+        entry.workspacePath = cachedWs;
+        changed = true;
+      }
     }
     if (
       convId === activeConvId &&
@@ -1810,13 +2026,20 @@ class ContextHealthServer {
           dirents = fs.readdirSync(this.brainDir, { withFileTypes: true });
         } catch {}
 
+        const activeWsKey = workspaceComparisonKey(activeWorkspaceNorm);
         const seenIds = new Set();
         for (const d of dirents) {
           if (!d.isDirectory() || d.name.startsWith('.')) continue;
           const convId = d.name.toLowerCase();
           if (!UUID_RE.test(convId)) continue;
           seenIds.add(convId);
-          if (this.refreshEntryById(convId, activeConvId, activeWorkspaceNorm, force || convId === activeConvId)) {
+          const existing = this.convCache.get(convId);
+          const inActiveWs =
+            !activeWsKey ||
+            !existing ||
+            !existing.workspacePath ||
+            workspaceComparisonKey(existing.workspacePath) === activeWsKey;
+          if (this.refreshEntryById(convId, activeConvId, activeWorkspaceNorm, force || convId === activeConvId || inActiveWs)) {
             anyTranscriptChanged = true;
           }
         }
@@ -1852,7 +2075,14 @@ class ContextHealthServer {
         }
 
         for (const convId of hotIds) {
-          if (this.refreshEntryById(convId, activeConvId, activeWorkspaceNorm, convId === activeConvId)) {
+          if (this.refreshEntryById(convId, activeConvId, activeWorkspaceNorm, false)) {
+            anyTranscriptChanged = true;
+          }
+        }
+
+        for (const [convId, entry] of this.convCache.entries()) {
+          if (entry.isSubagent || hotIds.has(convId)) continue;
+          if (this.applyEntryMetadata(entry, convId, activeConvId, activeWorkspaceNorm, false)) {
             anyTranscriptChanged = true;
           }
         }
@@ -1920,6 +2150,193 @@ class ContextHealthServer {
     return summary;
   }
 
+  lookupModelLabel(modelEnum) {
+    if (!modelEnum) return '';
+    const found = this.cachedModelsCatalog.models.find((m) => m.modelEnum === modelEnum);
+    return found ? found.label : '';
+  }
+
+  lookupModelByAny(val) {
+    const clean = (typeof val === 'string' ? val : '').trim();
+    if (!clean) return null;
+    const lower = clean.toLowerCase();
+    return (
+      this.cachedModelsCatalog.models.find(
+        (m) =>
+          m.modelEnum === clean ||
+          m.modelId === clean ||
+          m.label === clean ||
+          (m.modelId && m.modelId.toLowerCase() === lower) ||
+          m.label.toLowerCase() === lower
+      ) || null
+    );
+  }
+
+  getModelsCatalog(force = false) {
+    const now = Date.now();
+    if (
+      !force &&
+      this.cachedModelsCatalog.models.length > 0 &&
+      now - this.cachedModelsCatalog.fetchedAtMs < 60000
+    ) {
+      return Promise.resolve(this.cachedModelsCatalog);
+    }
+    if (this.modelsFetchPromise) {
+      return this.modelsFetchPromise;
+    }
+    if (!force && now - this.cachedModelsCatalog.fetchedAtMs < 5000) {
+      return Promise.resolve(this.cachedModelsCatalog);
+    }
+    this.modelsFetchPromise = (async () => {
+      try {
+        const res = await callLanguageServerRpc('GetCascadeModelConfigData', {});
+        const parsed = parseCascadeModelConfigs(res);
+        if (parsed.models.length > 0) {
+          const prevSig = JSON.stringify([
+            this.cachedModelsCatalog.defaultModelEnum,
+            this.cachedModelsCatalog.models.map((m) => m.modelEnum)
+          ]);
+          const nextSig = JSON.stringify([
+            parsed.defaultModelEnum,
+            parsed.models.map((m) => m.modelEnum)
+          ]);
+          this.cachedModelsCatalog = {
+            models: parsed.models,
+            defaultModelEnum: parsed.defaultModelEnum,
+            fetchedAtMs: Date.now()
+          };
+          if (prevSig !== nextSig) {
+            this.modelsCatalogRev += 1;
+            this.cachedCardsState = null;
+          }
+        } else {
+          this.cachedModelsCatalog.fetchedAtMs = Date.now();
+        }
+      } catch {} finally {
+        this.modelsFetchPromise = null;
+      }
+      return this.cachedModelsCatalog;
+    })();
+    return this.modelsFetchPromise;
+  }
+
+  async resolveConversationModelAsync(convId, force = false) {
+    const cleanId = (convId || '').trim().toLowerCase();
+    if (!UUID_RE.test(cleanId)) return '';
+    const entry = this.convCache.get(cleanId) || this.refreshSingleEntry(cleanId);
+    if (!force && entry && entry.modelEnum && entry.modelResolvedMtimeMs === entry.mtimeMs) {
+      return entry.modelEnum;
+    }
+    if (this.modelResolveInFlight.has(cleanId)) {
+      return (entry && entry.modelEnum) || '';
+    }
+    const lastTry = this.modelResolveCooldown.get(cleanId) || 0;
+    if (!force && Date.now() - lastTry < 4000) {
+      return (entry && entry.modelEnum) || '';
+    }
+    this.modelResolveInFlight.add(cleanId);
+    this.modelResolveCooldown.set(cleanId, Date.now());
+    try {
+      let res = await callLanguageServerRpc('GetCascadeTrajectoryGeneratorMetadata', {
+        cascadeId: cleanId,
+        generatorMetadataOffset: 0,
+        includeMessages: false
+      });
+      let list = Array.isArray(res && res.generatorMetadata)
+        ? res.generatorMetadata
+        : (Array.isArray(res && res.data && res.data.generatorMetadata) ? res.data.generatorMetadata : []);
+      if (list.length === 0) {
+        await callLanguageServerRpc('LoadTrajectory', { cascadeId: cleanId }, 3000);
+        res = await callLanguageServerRpc('GetCascadeTrajectoryGeneratorMetadata', {
+          cascadeId: cleanId,
+          generatorMetadataOffset: 0,
+          includeMessages: false
+        });
+        list = Array.isArray(res && res.generatorMetadata)
+          ? res.generatorMetadata
+          : (Array.isArray(res && res.data && res.data.generatorMetadata) ? res.data.generatorMetadata : []);
+      }
+      let foundEnum = '';
+      let foundLabel = '';
+      for (let i = list.length - 1; i >= 0; i--) {
+        const item = list[i];
+        if (!item) continue;
+        const mEnum =
+          (item.plannerConfig &&
+            item.plannerConfig.requestedModel &&
+            (item.plannerConfig.requestedModel.model || item.plannerConfig.requestedModel.alias)) ||
+          (item.plannerConfig && item.plannerConfig.planModel) ||
+          (item.chatModel && item.chatModel.model) ||
+          '';
+        const mLabel =
+          (item.chatModel && item.chatModel.modelDisplayName) ||
+          (item.plannerConfig && item.plannerConfig.modelName) ||
+          '';
+        if ((mEnum && mEnum !== 'MODEL_UNSPECIFIED') || mLabel) {
+          foundEnum = mEnum && mEnum !== 'MODEL_UNSPECIFIED' ? mEnum : '';
+          foundLabel = mLabel;
+          break;
+        }
+      }
+      if (foundLabel || foundEnum) {
+        const catalogHit =
+          (foundEnum && this.lookupModelByAny(foundEnum)) ||
+          (foundLabel && this.lookupModelByAny(foundLabel)) ||
+          null;
+        if (catalogHit) {
+          foundEnum = catalogHit.modelEnum;
+          foundLabel = catalogHit.label;
+        }
+      }
+      const targetEntry = this.convCache.get(cleanId) || entry;
+      if (targetEntry && (!res || !res.error)) {
+        targetEntry.modelResolvedMtimeMs = targetEntry.mtimeMs || Date.now();
+        if (foundEnum) {
+          const resolvedLabel = foundLabel || this.lookupModelLabel(foundEnum) || '';
+          if (
+            targetEntry.modelEnum !== foundEnum ||
+            (resolvedLabel && targetEntry.modelLabel !== resolvedLabel)
+          ) {
+            targetEntry.modelEnum = foundEnum;
+            if (resolvedLabel) targetEntry.modelLabel = resolvedLabel;
+            this.transcriptRev += 1;
+            this.cachedCardsState = null;
+            this.scheduleSaveIndexCache();
+          }
+        }
+      }
+      return foundEnum || (targetEntry && targetEntry.modelEnum) || '';
+    } catch {
+      return (entry && entry.modelEnum) || '';
+    } finally {
+      this.modelResolveInFlight.delete(cleanId);
+    }
+  }
+
+  triggerBackgroundModelResolution(hostConvId, visibleEntries) {
+    void this.getModelsCatalog(false);
+    const candidateIds = [];
+    if (hostConvId && UUID_RE.test(hostConvId)) {
+      candidateIds.push(hostConvId);
+    }
+    if (Array.isArray(visibleEntries)) {
+      for (const e of visibleEntries) {
+        if (!e || e.isSubagent) continue;
+        if (!candidateIds.includes(e.id)) {
+          candidateIds.push(e.id);
+        }
+        if (candidateIds.length >= 4) break;
+      }
+    }
+    for (const cid of candidateIds) {
+      const entry = this.convCache.get(cid);
+      if (!entry) continue;
+      if (entry.mtimeMs > 0 && entry.modelResolvedMtimeMs !== entry.mtimeMs) {
+        void this.resolveConversationModelAsync(cid, false);
+      }
+    }
+  }
+
   buildConversationCard(entry, globalObservedCeiling, subagentTokens) {
     const verbatimPrompts = entry.compactCount > 0
       ? Math.min(10, entry.promptCount)
@@ -1958,6 +2375,7 @@ class ContextHealthServer {
       workspaceName: effectiveWsName,
       lastActiveIso: entry.lastActiveIso || '',
       lastActiveMs: entry.lastActiveMs || 0,
+      lastUserInputMs: entry.lastUserInputMs || 0,
       lastViewMs: entry.lastViewMs || 0,
       latestHandoffMs: entry.latestHandoffMs || 0,
       latestHandoffPrompt: entry.latestHandoffPrompt || '',
@@ -1979,6 +2397,8 @@ class ContextHealthServer {
       title: entry.title || '',
       firstPrompt: entry.firstPrompt || '',
       lastPrompt: entry.lastPrompt || '',
+      modelEnum: entry.modelEnum || '',
+      modelLabel: entry.modelLabel || this.lookupModelLabel(entry.modelEnum) || '',
       git: {
         hasGit: drift.hasGit,
         commitsBehind: drift.commitsBehind
@@ -2025,25 +2445,9 @@ class ContextHealthServer {
       ? (matchedActiveProj.archived ? '' : (matchedActiveProj.primaryKey || matchedActiveProj.id))
       : (hasProjectsRegistry && detectedActiveWorkspaceNorm ? '' : workspaceComparisonKey(detectedActiveWorkspaceNorm));
 
-    const archivedConvCounts = new Map();
-    const visibleEntries = sortedEntries.filter((e) => {
-      if (e.isSubagent && e.id !== hostConvId) return false;
-      if (e.archived && e.id !== hostConvId) return false;
-      if (hasProjectsRegistry && e.workspacePath) {
-        const proj = this.matchProjectForWorkspace(e.workspacePath);
-        if (!proj) return false;
-        if (proj.archived) {
-          if (!e.isSubagent) {
-            archivedConvCounts.set(proj.id, (archivedConvCounts.get(proj.id) || 0) + 1);
-          }
-          return false;
-        }
-      }
-      return true;
-    });
-
     this.gitCache.checkKnownRepos(isForce);
 
+    let visibleEntries;
     let cards;
     let workspaces;
     let archivedProjects;
@@ -2053,29 +2457,39 @@ class ContextHealthServer {
       this.cachedCardsState.transcriptRev === this.transcriptRev &&
       this.cachedCardsState.projectsRev === this.projectsRev &&
       this.cachedCardsState.gitRev === this.gitCache.revision &&
-      this.cachedCardsState.hostConvId === hostConvId &&
-      this.cachedCardsState.activeWorkspaceKey === activeWorkspaceKey
+      this.cachedCardsState.modelsCatalogRev === this.modelsCatalogRev
     ) {
+      visibleEntries = this.cachedCardsState.visibleEntries;
       cards = this.cachedCardsState.cards;
       workspaces = this.cachedCardsState.workspaces;
       archivedProjects = this.cachedCardsState.archivedProjects;
     } else {
+      const archivedConvCounts = new Map();
+      const hiddenMainItems = [];
+      visibleEntries = sortedEntries.filter((e) => {
+        if (e.isSubagent) return false;
+        if (e.archived) {
+          hiddenMainItems.push([e.id, e.lastActiveMs, e.latestHandoffMs, e.currentTokens, e.totalTokens, e.promptCount, e.compactCount]);
+          return false;
+        }
+        if (hasProjectsRegistry && e.workspacePath) {
+          const proj = this.matchProjectForWorkspace(e.workspacePath);
+          if (!proj) {
+            hiddenMainItems.push([e.id, e.lastActiveMs, e.latestHandoffMs, e.currentTokens, e.totalTokens, e.promptCount, e.compactCount]);
+            return false;
+          }
+          if (proj.archived) {
+            archivedConvCounts.set(proj.id, (archivedConvCounts.get(proj.id) || 0) + 1);
+            hiddenMainItems.push([e.id, e.lastActiveMs, e.latestHandoffMs, e.currentTokens, e.totalTokens, e.promptCount, e.compactCount]);
+            return false;
+          }
+        }
+        return true;
+      });
+
       cards = visibleEntries.map((entry) =>
         this.buildConversationCard(entry, globalObservedCeiling, subagentTokens)
       );
-
-      if (UUID_RE.test(hostConvId) && !cards.some((c) => c.id === hostConvId)) {
-        const candidateWs =
-          detectedActiveWorkspaceNorm || this.metadataWorkspaceCache.get(hostConvId) || '';
-        const candidateProj = this.matchProjectForWorkspace(candidateWs);
-        const isArchivedOrOrphan =
-          hasProjectsRegistry && candidateWs && (!candidateProj || candidateProj.archived);
-        if (!isArchivedOrOrphan) {
-          const placeholderEntry = createEmptyEntry(hostConvId);
-          placeholderEntry.workspacePath = candidateWs;
-          cards.unshift(this.buildConversationCard(placeholderEntry, globalObservedCeiling, subagentTokens));
-        }
-      }
 
       const workspaceMap = new Map();
       for (const c of cards) {
@@ -2123,14 +2537,16 @@ class ContextHealthServer {
       archivedProjects.sort((a, b) => a.name.localeCompare(b.name));
 
       const signature = JSON.stringify({
-        hostConvId,
-        activeWorkspaceKey,
         globalObservedCeiling,
+        projectsRev: this.projectsRev,
+        modelsCatalogRev: this.modelsCatalogRev,
         archivedIds: archivedProjects.map((p) => [p.id, p.count]),
+        hiddenMainItems,
         items: cards.map((c) => [
           c.id,
           c.title,
           c.lastActiveMs,
+          c.lastUserInputMs,
           c.lastViewMs,
           c.latestHandoffMs,
           c.compactCount,
@@ -2141,6 +2557,8 @@ class ContextHealthServer {
           c.subagentTokens,
           c.workspaceKey,
           c.projectId,
+          c.modelEnum,
+          c.modelLabel,
           c.git.commitsBehind
         ])
       });
@@ -2154,13 +2572,15 @@ class ContextHealthServer {
         transcriptRev: this.transcriptRev,
         projectsRev: this.projectsRev,
         gitRev: this.gitCache.revision,
-        hostConvId,
-        activeWorkspaceKey,
+        modelsCatalogRev: this.modelsCatalogRev,
+        visibleEntries,
         cards,
         workspaces,
         archivedProjects
       };
     }
+
+    this.triggerBackgroundModelResolution(hostConvId, visibleEntries);
 
     const now = Date.now();
     if (isForce || now - this.lastUiStatCheckMs >= 2000) {
@@ -2179,6 +2599,19 @@ class ContextHealthServer {
         uiMtimeMs,
         refreshMs: Number(this.lastRefreshDurationMs.toFixed(2))
       };
+    }
+
+    if (UUID_RE.test(hostConvId) && !cards.some((c) => c.id === hostConvId)) {
+      const hostEntry = sortedEntries.find((e) => e.id === hostConvId);
+      if (hostEntry) {
+        cards = [this.buildConversationCard(hostEntry, globalObservedCeiling, subagentTokens), ...cards];
+      } else {
+        const candidateWs =
+          detectedActiveWorkspaceNorm || this.metadataWorkspaceCache.get(hostConvId) || '';
+        const placeholderEntry = createEmptyEntry(hostConvId);
+        placeholderEntry.workspacePath = candidateWs;
+        cards = [this.buildConversationCard(placeholderEntry, globalObservedCeiling, subagentTokens), ...cards];
+      }
     }
 
     let searchMatches = null;
@@ -2211,6 +2644,8 @@ class ContextHealthServer {
       refreshMs: Number(this.lastRefreshDurationMs.toFixed(2)),
       hostConversationId: hostConvId || null,
       activeWorkspaceKey: activeWorkspaceKey || '',
+      availableModels: this.cachedModelsCatalog.models,
+      defaultModelEnum: this.cachedModelsCatalog.defaultModelEnum || '',
       workspaces,
       archivedProjects,
       conversations: cards,
@@ -2251,12 +2686,17 @@ class ContextHealthServer {
       return { status: 404, body: { error: 'Conversation not found' } };
     }
 
+    void this.resolveConversationModelAsync(convId, false);
     const promptForAgentHandoff = buildAgentHandoffRequest(entry, focusTopic);
     return {
       status: 200,
       body: {
         id: entry.id,
         compactCount: entry.compactCount,
+        modelEnum: entry.modelEnum || '',
+        modelLabel: entry.modelLabel || this.lookupModelLabel(entry.modelEnum),
+        latestHandoffMs: entry.latestHandoffMs || 0,
+        latestHandoffPrompt: entry.latestHandoffPrompt || '',
         promptForAgentHandoff
       }
     };
@@ -2382,6 +2822,27 @@ class ContextHealthServer {
       return;
     }
 
+    if (req.method === 'GET' && pathname === '/api/models') {
+      const catalog = await this.getModelsCatalog(query.refresh === '1');
+      const qConvId = typeof query.convId === 'string' ? query.convId.trim().toLowerCase() : '';
+      let convModelEnum = '';
+      let convModelLabel = '';
+      if (UUID_RE.test(qConvId)) {
+        const resolvedEnum = await this.resolveConversationModelAsync(qConvId, false);
+        const entry = this.convCache.get(qConvId);
+        convModelEnum = resolvedEnum || (entry && entry.modelEnum) || '';
+        convModelLabel = (entry && entry.modelLabel) || this.lookupModelLabel(convModelEnum);
+      }
+      sendJson(res, 200, {
+        models: catalog.models || [],
+        defaultModelEnum: catalog.defaultModelEnum || '',
+        convId: qConvId || '',
+        convModelEnum,
+        convModelLabel
+      });
+      return;
+    }
+
     if (req.method === 'POST' && pathname === '/api/project-archive') {
       const body = await this.readJsonBody(req);
       const { status, body: outBody } = this.setProjectArchived(body.projectId, body.archived);
@@ -2397,7 +2858,15 @@ class ContextHealthServer {
         sendJson(res, 400, { error: 'Invalid conversationId or empty message' });
         return;
       }
-      const out = await execAgentApi(['send-message', convId, message], body.projectId, this.appDataDir);
+      this.refreshProjectsRegistry(false);
+      const entry = this.convCache.get(convId.toLowerCase()) || this.refreshSingleEntry(convId.toLowerCase());
+      const wsPath = (typeof body.workspacePath === 'string' && body.workspacePath.trim()) || (entry && entry.workspacePath) || '';
+      const matchedProj = wsPath ? this.matchProjectForWorkspace(wsPath) : null;
+      const effectiveProjectId =
+        (typeof body.projectId === 'string' && body.projectId.trim()) ||
+        (matchedProj ? matchedProj.id : '');
+      const nativeWsPath = wsPath && process.platform === 'win32' ? wsPath.replace(/\//g, '\\') : wsPath;
+      const out = await execAgentApi(['send-message', convId, message], effectiveProjectId, this.appDataDir, nativeWsPath);
       if (out && out.error) {
         sendJson(res, 502, out);
         return;
@@ -2413,16 +2882,166 @@ class ContextHealthServer {
         sendJson(res, 400, { error: 'Empty message' });
         return;
       }
+      this.refreshProjectsRegistry(false);
+      const catalog = await this.getModelsCatalog(false);
+      const srcConvId = typeof body.conversationId === 'string' ? body.conversationId.trim().toLowerCase() : '';
+      const srcEntry = UUID_RE.test(srcConvId)
+        ? (this.convCache.get(srcConvId) || this.refreshSingleEntry(srcConvId))
+        : null;
+      const rawWsPath =
+        (typeof body.workspacePath === 'string' && body.workspacePath.trim()) ||
+        (srcEntry && srcEntry.workspacePath) ||
+        '';
+      const normWsPath = rawWsPath ? resolveCanonicalWorkspace(rawWsPath) : '';
+      const matchedProj = normWsPath ? this.matchProjectForWorkspace(normWsPath) : null;
+      const effectiveProjectId =
+        (typeof body.projectId === 'string' && body.projectId.trim()) ||
+        (matchedProj ? matchedProj.id : '');
+      const effectiveWsPath = normWsPath || (matchedProj && matchedProj.primaryPath) || '';
+      const nativeWsPath =
+        effectiveWsPath && process.platform === 'win32'
+          ? effectiveWsPath.replace(/\//g, '\\')
+          : effectiveWsPath;
+
+      const requestedModelRaw =
+        (typeof body.model === 'string' && body.model.trim()) ||
+        (typeof body.modelId === 'string' && body.modelId.trim()) ||
+        '';
+      let matchedModel = requestedModelRaw ? this.lookupModelByAny(requestedModelRaw) : null;
+      let selectedModelEnum = matchedModel ? matchedModel.modelEnum : '';
+      if (!selectedModelEnum && requestedModelRaw.startsWith('MODEL_')) {
+        selectedModelEnum = requestedModelRaw;
+      }
+      if (!selectedModelEnum && srcEntry && srcEntry.modelEnum) {
+        selectedModelEnum = srcEntry.modelEnum;
+      }
+      if (!selectedModelEnum && UUID_RE.test(srcConvId)) {
+        selectedModelEnum = await this.resolveConversationModelAsync(srcConvId, false);
+      }
+      if (!selectedModelEnum && catalog && catalog.defaultModelEnum) {
+        selectedModelEnum = catalog.defaultModelEnum;
+      }
+      if (!matchedModel && selectedModelEnum) {
+        matchedModel = this.lookupModelByAny(selectedModelEnum);
+      }
+      const selectedModelId = (matchedModel && matchedModel.modelId) || requestedModelRaw || '';
+      const selectedModelLabel =
+        (matchedModel && matchedModel.label) || this.lookupModelLabel(selectedModelEnum);
+
+      const seedNewConversation = (rawNewId) => {
+        const cleanNewId = (typeof rawNewId === 'string' ? rawNewId : '').trim().toLowerCase();
+        if (!cleanNewId || !UUID_RE.test(cleanNewId)) return;
+        const nowMs = Date.now();
+        if (effectiveWsPath) {
+          this.metadataWorkspaceCache.set(cleanNewId, effectiveWsPath);
+          this.saveMetadataCache();
+        }
+        const preEntry = this.convCache.get(cleanNewId) || createEmptyEntry(cleanNewId);
+        if (effectiveWsPath && !preEntry.workspacePath) {
+          preEntry.workspacePath = effectiveWsPath;
+        }
+        if (selectedModelEnum) {
+          preEntry.modelEnum = selectedModelEnum;
+          preEntry.modelLabel = selectedModelLabel;
+          preEntry.modelResolvedMtimeMs = nowMs;
+        }
+        preEntry.lastActiveIso = new Date(nowMs).toISOString();
+        preEntry.lastActiveMs = Math.max(preEntry.lastActiveMs || 0, nowMs);
+        preEntry.lastUserInputMs = Math.max(preEntry.lastUserInputMs || 0, nowMs);
+        preEntry.lastViewMs = Math.max(preEntry.lastViewMs || 0, nowMs);
+        if (!preEntry.firstPrompt) {
+          preEntry.firstPrompt = message.slice(0, 500);
+          preEntry.lastPrompt = preEntry.firstPrompt;
+          preEntry.promptCount = Math.max(preEntry.promptCount || 0, 1);
+          rebuildSearchCorpus(preEntry);
+        }
+        this.convCache.set(cleanNewId, preEntry);
+        this.transcriptRev += 1;
+        this.cachedIndexSummary = null;
+        this.cachedCardsState = null;
+        this.scheduleSaveIndexCache();
+      };
+
+      const baseStartPayload = {
+        source: 'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',
+        trajectoryType: 'CORTEX_TRAJECTORY_TYPE_CASCADE',
+        ...(selectedModelEnum ? { requestedModel: { model: selectedModelEnum } } : {})
+      };
+      const startPayload = { ...baseStartPayload };
+      if (effectiveProjectId) {
+        startPayload.projectEnvConfig = {
+          projectId: effectiveProjectId,
+          defaultProjectEnvironment: {}
+        };
+      } else if (nativeWsPath) {
+        try {
+          startPayload.workspaceUris = [pathToFileURL(nativeWsPath).href];
+        } catch {}
+      }
+
+      let startRpc = await callLanguageServerRpc('StartCascade', startPayload, 8000);
+      if (startRpc.error && effectiveProjectId && nativeWsPath) {
+        const retryPayload = { ...baseStartPayload };
+        try {
+          retryPayload.workspaceUris = [pathToFileURL(nativeWsPath).href];
+        } catch {}
+        startRpc = await callLanguageServerRpc('StartCascade', retryPayload, 8000);
+      }
+
+      const rawCascadeId =
+        (startRpc && typeof startRpc.cascadeId === 'string' && startRpc.cascadeId) ||
+        (startRpc && startRpc.data && typeof startRpc.data.cascadeId === 'string' && startRpc.data.cascadeId) ||
+        '';
+      const cascadeId = rawCascadeId.trim().toLowerCase();
+      if (cascadeId && UUID_RE.test(cascadeId)) {
+        const sendPayload = {
+          cascadeId,
+          items: [{ text: message }],
+          metadata: {},
+          clientType: 'CHAT_CLIENT_REQUEST_STREAM_CLIENT_TYPE_IDE'
+        };
+        if (selectedModelEnum) {
+          sendPayload.cascadeConfig = {
+            plannerConfig: {
+              planModel: selectedModelEnum,
+              requestedModel: { model: selectedModelEnum }
+            }
+          };
+        }
+        const sendRpc = await callLanguageServerRpc('SendUserCascadeMessage', sendPayload, 12000);
+        if (sendRpc.error) {
+          sendJson(res, 502, { error: sendRpc.error, cascadeId });
+          return;
+        }
+        seedNewConversation(cascadeId);
+        this.lastFullScanMs = 0;
+        this.lastBrainDirMtimeMs = 0;
+        sendJson(res, 200, {
+          response: {
+            conversationId: cascadeId,
+            cascadeId,
+            modelEnum: selectedModelEnum,
+            modelLabel: selectedModelLabel
+          }
+        });
+        return;
+      }
+
       const args = ['new-conversation'];
-      if (body.model && typeof body.model === 'string') {
-        args.push('--model', body.model);
+      if (selectedModelId) {
+        args.push('--model', selectedModelId);
       }
       args.push(message);
-      const out = await execAgentApi(args, body.projectId, this.appDataDir);
+      const out = await execAgentApi(args, effectiveProjectId, this.appDataDir, nativeWsPath);
       if (out && out.error) {
         sendJson(res, 502, out);
         return;
       }
+      const cliResp = (out && typeof out.response === 'object' && out.response) ? out.response : out;
+      const cliConvId = (cliResp && (cliResp.conversationId || cliResp.cascadeId)) || '';
+      seedNewConversation(cliConvId);
+      this.lastFullScanMs = 0;
+      this.lastBrainDirMtimeMs = 0;
       sendJson(res, 200, out);
       return;
     }
