@@ -1407,13 +1407,13 @@ function parseModelFamilyAndTier(label) {
 function getTierSortWeight(tier) {
   const t = (tier || '').trim().toLowerCase();
   if (!t) return 0;
-  if (t === 'max' || t === 'extra high' || t === 'ultra') return 10;
+  if (t === 'max' || t === 'extra high' || t === 'ultra' || t === 'elite' || t === 'pro') return 10;
   if (t === 'high') return 20;
   if (t === 'thinking') return 25;
   if (t === 'medium') return 30;
   if (t === 'low thinking') return 40;
   if (t === 'low') return 50;
-  if (t === 'extra low' || t === 'minimal') return 60;
+  if (t === 'extra low' || t === 'minimal' || t === 'lite') return 60;
   return 35;
 }
 
@@ -1490,9 +1490,20 @@ function parseCascadeModelConfigs(data) {
       return a.family.localeCompare(b.family, undefined, { numeric: true, sensitivity: 'base' });
     }
 
+    const aLblRec = recommendedLabelOrder.has(a.label) ? recommendedLabelOrder.get(a.label) : 9999;
+    const bLblRec = recommendedLabelOrder.has(b.label) ? recommendedLabelOrder.get(b.label) : 9999;
+    if (aLblRec !== bLblRec && aLblRec !== 9999 && bLblRec !== 9999) {
+      return aLblRec - bLblRec;
+    }
+
     const aWeight = getTierSortWeight(a.tier);
     const bWeight = getTierSortWeight(b.tier);
-    if (aWeight !== bWeight) return aWeight - bWeight;
+    if (aWeight !== bWeight) {
+      if (aWeight === 35 && aLblRec !== 9999) return -1;
+      if (bWeight === 35 && bLblRec !== 9999) return 1;
+      return aWeight - bWeight;
+    }
+    if (aLblRec !== bLblRec) return aLblRec - bLblRec;
     return a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' });
   });
 
