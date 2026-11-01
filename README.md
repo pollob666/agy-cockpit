@@ -10,6 +10,10 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 
 **Context Health** runs as a lightweight sidecar panel inside Antigravity (`Auxiliary Pane` and `Sidebar`). It monitors live context window usage, compaction tiers, cumulative token consumption (including spawned subagents), and Git drift across all your projects, and provides a **Two-Step Smart Handoff** to seamlessly continue work in a fresh conversation.
 
+<p align="center">
+  <img src="screenshots/hero.png" alt="Context Health Sidecar Panel" width="620" />
+</p>
+
 ---
 
 ## Features
@@ -21,6 +25,10 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
   - `3 to 5 compacts` (or `0 to 2` compacts once earlier prompts are compacted): **Warm** (`#eab308`)
   - `6 to 9 compacts`: **Heavy** (`#f97316`)
   - `10+ compacts`: **Polluted** (`#ef4444`)
+
+<p align="center">
+  <img src="screenshots/compaction-tiers.gif" alt="Context Health Compaction Tiers (Fresh to Polluted)" width="617" />
+</p>
 - **Prompt Retention Tracking**: Each Antigravity compaction retains the last 10 user prompts in full. When earlier prompts have been compacted, the active card displays `Prompts: 10 full · M compacted`.
 - **Dynamic Context Window Ceiling (Zero Hardcoded Limits)**:
   - Reads `currentTokens = input_tokens + cache_read_tokens` from the latest `PLANNER_RESPONSE`.
@@ -44,9 +52,14 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 - **Project Archiving / Unarchiving**: Right-click any project tab to **Archive Project**, hiding that project and its conversations from both the Antigravity sidebar and Context Health without deleting any data. Click the `Archived (N)` tab anytime to restore archived projects.
 - **Instant Full-Text Search & Prompt History**: Filters conversations in real time across titles, `USER_INPUT` prompts, and `Task Overview` checkpoint summaries. Expanding `History & Commits` shows missed Git commits, the latest compact overview, and user prompts clamped to 3 lines (`Show more` / `Show less`).
 
-### 5. Two-Step Smart Handoff
-- **Step 1 (Optional Focus & AI Generation)**: Click **Smart Handoff** to open an editable focus box where you can optionally specify instructions for the next chat, then click **Generate Handoff Prompt**. Context Health sends a `[Context Health Smart Handoff]` request to the conversation's agent via `window.sidecar.agent.sendMessage(...)` instructing it to produce a self-contained `<HANDOFF_PROMPT>` in the same language used in the conversation without calling any tools.
-- **Step 2 (In-Place Review, Edit & Launch)**: As soon as the agent replies, the extracted `<HANDOFF_PROMPT>` is loaded directly into the plugin's editor so you can review or edit it before clicking **Start New Chat** (`window.sidecar.agent.startConversation(...)`) or **Copy**.
+### 5. Two-Step Smart Handoff & Dynamic Model Selector
+- **Step 1 (Optional Focus & AI Generation)**: Click **Smart Handoff** to open an editable focus box where you can optionally specify instructions for the next chat (such as focusing on a specific subtask or writing the handoff in another language), then click **Generate Handoff Prompt**. Context Health sends a `[Context Health Smart Handoff]` request to the conversation's agent instructing it to produce a self-contained `<HANDOFF_PROMPT>` without calling any tools.
+- **Step 2 (Review, Edit, Select Model & Launch)**: As soon as the agent replies, the extracted `<HANDOFF_PROMPT>` is loaded directly into the plugin's editor so you can review or edit it before clicking **Start New Chat** or **Copy**. Clearing the text box (for example with `Ctrl+A` and `Backspace`) automatically switches the drawer back to Step 1 (**Generate Handoff Prompt**) so you can enter new instructions and regenerate.
+- **Dynamic Model & Thinking Tier Selector**: Discovers all models and thinking tiers available to your account from the local Antigravity Language Server, pre-selects the active conversation's current model and thinking tier by default, and launches the new conversation directly with the chosen model and thinking tier from Step 0 inside the same project and workspace.
+
+<p align="center">
+  <img src="screenshots/smart-handoff.png" alt="Smart Handoff Review & Dynamic Model / Thinking Tier Selector" width="535" />
+</p>
 
 ---
 
@@ -137,7 +150,19 @@ Once installed, **Context Health** is automatically enabled and available in:
 │       ├── sidecar.json              # Antigravity sidecar manifest (AUX_PANE + SIDEBAR)
 │       ├── server.cjs                # HTTP + incremental transcript, token & git indexing server
 │       └── ui.html                   # Auxiliary pane & sidebar UI
+├── screenshots/
+│   ├── hero.png                      # Full Context Health panel preview
+│   ├── compaction-tiers.gif          # Animated progression across compaction tiers
+│   └── smart-handoff.png             # Smart Handoff editor with Model & Thinking Tier selector
 ├── setup.cjs                         # Cross-platform installer & updater (Windows & Linux)
 ├── AGENTS.md                         # Instructions & installation runbook for AI coding agents
+├── LICENSE                           # MIT License
 └── README.md                         # Human & AI agent documentation
 ```
+
+---
+
+## License
+
+Licensed under the [MIT License](./LICENSE).
+
