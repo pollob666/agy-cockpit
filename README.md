@@ -17,6 +17,7 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 </p>
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [Features](#features)
   - [1. Real-Time Context Pollution & Prompt Retention](#1-real-time-context-pollution--prompt-retention)
@@ -49,6 +50,7 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 <p align="center">
   <img src="screenshots/compaction-tiers.gif" alt="AGY Cockpit Compaction Tiers (Fresh to Polluted)" width="617" />
 </p>
+
 - **Prompt Retention Tracking**: Each Antigravity compaction retains the last 10 user prompts in full. When earlier prompts have been compacted, the active card displays `Prompts: 10 full · M compacted`.
 - **Dynamic Context Window Ceiling (Zero Hardcoded Limits)**:
   - Reads `currentTokens = input_tokens + cache_read_tokens` from the latest `PLANNER_RESPONSE`.
@@ -115,6 +117,7 @@ Install the AGY Cockpit plugin from this repository by running `node setup.cjs` 
 ```
 
 #### Step-by-Step Instructions for AI Agents
+
 If you are an AI agent asked to install or update **AGY Cockpit** on a user's system (Windows or Linux):
 1. **Clone or locate the repository** (if not already open in the workspace).
 2. **Run the installer outside the sandbox**:
@@ -167,6 +170,7 @@ node setup.cjs --uninstall
 ```
 
 ### Opening the Panel in Antigravity
+
 Once installed, **AGY Cockpit** is automatically enabled and available in:
 - The right **Auxiliary Pane** (`Extensions` / sidecar tab)
 - The left **Sidebar** (`Plugins` section)
