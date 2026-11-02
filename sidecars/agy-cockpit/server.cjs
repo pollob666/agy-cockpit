@@ -105,6 +105,9 @@ const FALLBACK_PRELOAD_JS = `(function() {
     ui: {
       toggleConversation(convId) {
         window.parent.postMessage({ type: 'toggle-conversation', payload: { conversationId: convId } }, '*');
+      },
+      toggleAuxPane(request) {
+        window.parent.postMessage({ type: 'toggle-aux-pane', payload: request }, '*');
       }
     }
   };
@@ -295,6 +298,9 @@ function findGitOrWorkspaceRoot(rawCandidatePath) {
     curr = parent;
   }
 
+  if (gitRootLookupCache.size > 4096) {
+    gitRootLookupCache.clear();
+  }
   for (const v of visited) {
     gitRootLookupCache.set(v, foundRoot);
   }
@@ -1269,7 +1275,8 @@ function processTranscriptLine(entry, line, isFirstLine) {
     if (content && content.trim()) {
       const trimmedContent = content.trim();
       const isTruncatedContent =
-        Array.isArray(obj.truncated_fields) && obj.truncated_fields.includes('content');
+        (Array.isArray(obj.truncated_fields) && obj.truncated_fields.includes('content')) ||
+        content.includes('\n<truncated ');
       const handoffMatch = /<HANDOFF_PROMPT>\s*([\s\S]*?)\s*<\/HANDOFF_PROMPT>/i.exec(trimmedContent);
       if (handoffMatch && handoffMatch[1].trim() && !isTruncatedContent) {
         isHandoffStep = true;
@@ -1767,7 +1774,9 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
   if (
     entry.lastStepType === 'PLANNER_RESPONSE' &&
     entry.lastModelResponse &&
-    stat.mtimeMs > (entry.lastModelResponseMs || 0)
+    entry.lastModelResponseMs > 0 &&
+    stat.mtimeMs > entry.lastModelResponseMs &&
+    stat.mtimeMs - entry.lastModelResponseMs < 1000
   ) {
     entry.lastModelResponseMs = Math.floor(stat.mtimeMs);
   }
@@ -2197,6 +2206,35 @@ function scanBinarySymbols(binaryPath, symbols) {
   return result;
 }
 
+function readFileTailLines(filePath, maxBytes = 512 * 1024, maxLines = 80) {
+  let fd;
+  try {
+    const st = fs.statSync(filePath, { throwIfNoEntry: false });
+    if (!st || !st.isFile() || st.size <= 0) return [];
+    const readSize = Math.min(st.size, maxBytes);
+    const startOffset = Math.max(0, st.size - readSize);
+    fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.allocUnsafe(readSize);
+    const bytesRead = fs.readSync(fd, buf, 0, readSize, startOffset);
+    let text = buf.subarray(0, bytesRead).toString('utf-8');
+    if (startOffset > 0) {
+      const firstNl = text.indexOf('\n');
+      if (firstNl >= 0) {
+        text = text.slice(firstNl + 1);
+      }
+    }
+    return text.split(/\r?\n/).filter(Boolean).slice(-maxLines);
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
 function resolveAgentApiCommand(appDataDir) {
   const envExe = process.env.ANTIGRAVITY_AGENTAPI_EXE?.trim();
   if (envExe && isFile(envExe)) {
@@ -2204,63 +2242,25 @@ function resolveAgentApiCommand(appDataDir) {
     return { file: envExe, prefix: isDirect ? [] : ['agentapi'], shell: false };
   }
 
+  const lsBin = resolveLanguageServerBinary(appDataDir);
+  if (lsBin) {
+    return { file: lsBin, prefix: ['agentapi'], shell: false };
+  }
+
   const geminiRoot = path.join(os.homedir(), '.gemini');
   const candidateDirs = [
     appDataDir || resolveAppDataDir(),
     ...APP_CANDIDATES.map((app) => path.join(geminiRoot, app))
   ].filter(Boolean);
-
-  if (process.platform === 'win32') {
-    const localApp = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-    const langServer = path.join(localApp, 'Programs', 'antigravity', 'resources', 'bin', 'language_server.exe');
-    if (isFile(langServer)) {
-      return { file: langServer, prefix: ['agentapi'], shell: false };
-    }
-    for (const d of candidateDirs) {
-      const bat = path.join(d, 'bin', 'agentapi.bat');
-      if (isFile(bat)) {
-        try {
-          const batContent = fs.readFileSync(bat, 'utf-8');
-          const exeMatch = /"([^"]+\.exe)"/i.exec(batContent);
-          if (exeMatch && isFile(exeMatch[1])) {
-            return { file: exeMatch[1], prefix: ['agentapi'], shell: false };
-          }
-        } catch {}
-        return { file: bat, prefix: [], shell: true };
-      }
-    }
-    return { file: 'agentapi', prefix: [], shell: true };
-  }
-
+  const wrapperName = process.platform === 'win32' ? 'agentapi.bat' : 'agentapi';
+  const useShell = process.platform === 'win32';
   for (const d of candidateDirs) {
-    const nixBin = path.join(d, 'bin', 'agentapi');
-    if (isFile(nixBin)) {
-      try {
-        const scriptContent = fs.readFileSync(nixBin, 'utf-8');
-        const binMatch = /"([^"\n]+language_server[^"\n]*)"/.exec(scriptContent);
-        if (binMatch && isFile(binMatch[1])) {
-          return { file: binMatch[1], prefix: ['agentapi'], shell: false };
-        }
-      } catch {}
-      return { file: nixBin, prefix: [], shell: false };
+    const wrapper = path.join(d, 'bin', wrapperName);
+    if (isFile(wrapper)) {
+      return { file: wrapper, prefix: [], shell: useShell };
     }
   }
-
-  const linuxCandidates = [
-    '/opt/Antigravity/resources/bin/language_server_linux_x64',
-    '/opt/Antigravity/resources/bin/language_server',
-    '/opt/antigravity/resources/bin/language_server_linux_x64',
-    '/opt/antigravity/resources/bin/language_server',
-    '/usr/share/antigravity/resources/bin/language_server',
-    path.join(os.homedir(), '.local', 'share', 'antigravity', 'resources', 'bin', 'language_server')
-  ];
-  for (const binPath of linuxCandidates) {
-    if (isFile(binPath)) {
-      return { file: binPath, prefix: ['agentapi'], shell: false };
-    }
-  }
-
-  return { file: 'agentapi', prefix: [], shell: false };
+  return { file: 'agentapi', prefix: [], shell: useShell };
 }
 
 function execAgentApi(args, projectId, appDataDir, workspacePath = '', timeoutMs = 12000, clearProjectEnv = false) {
@@ -2762,8 +2762,10 @@ class AgyCockpitServer {
     this.metadataWorkspaceCache = new Map();
     this.annotationTitleCache = new Map();
     this.annotationsDir = path.join(this.appDataDir, 'annotations');
+    this.lastAnnotationsDirMtimeMs = 0;
     this.projectsRegistry = new Map();
     this.projectFileMtimes = new Map();
+    this.lastProjectsCheckMs = 0;
     this.lastProjectsScanMs = 0;
     this.lastProjectsDirMtimeMs = 0;
     this.projectsRev = 1;
@@ -2778,6 +2780,7 @@ class AgyCockpitServer {
     this.cachedCardsState = null;
     this.cachedUiMtimeMs = 0;
     this.lastUiStatCheckMs = 0;
+    this.scriptChangedOnDisk = false;
     this.saveCacheTimer = null;
     this.indexCacheDirty = false;
     this.server = null;
@@ -2799,6 +2802,7 @@ class AgyCockpitServer {
     this.diagnosticsRev = 1;
     this.lastBinaryStatCheckMs = 0;
     this.lastKnownBinarySig = '';
+    this.lastKnownSymbolsKey = '';
 
     this.indexCachePath = path.join(this.dataDir, 'index_cache.json');
     this.metadataCachePath = path.join(this.dataDir, 'metadata_cache.json');
@@ -2809,8 +2813,6 @@ class AgyCockpitServer {
     this.pinnedConversations = new Map();
     this.customTitles = new Map();
     this.archivedDataRaw = {
-      archivedProjects: [],
-      archivedConversations: [],
       pinnedConversations: {},
       customTitles: {}
     };
@@ -2830,8 +2832,6 @@ class AgyCockpitServer {
       const raw = JSON.parse(fs.readFileSync(this.archivedDataPath, 'utf-8'));
       if (!raw || typeof raw !== 'object') return;
       this.archivedDataRaw = {
-        archivedProjects: Array.isArray(raw.archivedProjects) ? raw.archivedProjects : [],
-        archivedConversations: Array.isArray(raw.archivedConversations) ? raw.archivedConversations : [],
         pinnedConversations: {},
         customTitles: {}
       };
@@ -2889,6 +2889,10 @@ class AgyCockpitServer {
         const raw = JSON.parse(fs.readFileSync(this.diagnosticsCachePath, 'utf-8'));
         if (raw && typeof raw.binarySig === 'string') {
           this.lastKnownBinarySig = raw.binarySig;
+          if (typeof raw.symbolsKey === 'string' && Array.isArray(raw.foundSymbols)) {
+            this.lastKnownSymbolsKey = raw.symbolsKey;
+            binarySymbolCache.set(`${raw.binarySig}|${raw.symbolsKey}`, raw.foundSymbols);
+          }
         }
       } catch {}
     }
@@ -2977,19 +2981,27 @@ class AgyCockpitServer {
   }
 
   loadPreloadJs() {
-    const sdkPreload = path.join(this.appDataDir, 'lib', 'node_modules', 'sidecar_sdk', 'preload.js');
-    if (isFile(sdkPreload)) {
-      try {
-        return fs.readFileSync(sdkPreload, 'utf-8');
-      } catch {}
-    }
     return FALLBACK_PRELOAD_JS;
+  }
+
+  markTranscriptDirty({ resetSummary = true, saveIndex = true, bumpStateVersion = false } = {}) {
+    this.transcriptRev += 1;
+    if (resetSummary) {
+      this.cachedIndexSummary = null;
+    }
+    this.cachedCardsState = null;
+    if (bumpStateVersion) {
+      this.stateVersion += 1;
+    }
+    if (saveIndex) {
+      this.scheduleSaveIndexCache();
+    }
   }
 
   resolveConversationAnnotation(convId, forceStat = false) {
     const now = Date.now();
     const cached = this.annotationTitleCache.get(convId);
-    if (!forceStat && cached && now - cached.checkedAtMs < 1000) {
+    if (!forceStat && cached && now - cached.checkedAtMs < 2500) {
       return cached;
     }
 
@@ -3128,9 +3140,7 @@ class AgyCockpitServer {
       changed = true;
     }
     if (changed) {
-      this.transcriptRev += 1;
-      this.cachedCardsState = null;
-      this.scheduleSaveIndexCache();
+      this.markTranscriptDirty({ resetSummary: false, saveIndex: true });
     }
     return changed;
   }
@@ -3210,10 +3220,7 @@ class AgyCockpitServer {
     if (entry) {
       entry.archived = nextArchived;
     }
-    this.transcriptRev += 1;
-    this.cachedIndexSummary = null;
-    this.cachedCardsState = null;
-    this.scheduleSaveIndexCache();
+    this.markTranscriptDirty();
     return {
       status: 200,
       body: {
@@ -3264,10 +3271,7 @@ class AgyCockpitServer {
     }
     this.lastFullScanMs = 0;
     this.lastBrainDirMtimeMs = 0;
-    this.transcriptRev += 1;
-    this.cachedIndexSummary = null;
-    this.cachedCardsState = null;
-    this.scheduleSaveIndexCache();
+    this.markTranscriptDirty();
 
     return {
       status: 200,
@@ -3293,9 +3297,7 @@ class AgyCockpitServer {
       this.pinnedConversations.delete(cleanId);
     }
     this.saveArchivedData();
-    this.transcriptRev += 1;
-    this.cachedCardsState = null;
-    this.stateVersion += 1;
+    this.markTranscriptDirty({ resetSummary: false, saveIndex: false, bumpStateVersion: true });
     return {
       status: 200,
       body: {
@@ -3320,9 +3322,7 @@ class AgyCockpitServer {
       this.customTitles.delete(cleanId);
     }
     this.saveArchivedData();
-    this.transcriptRev += 1;
-    this.cachedCardsState = null;
-    this.stateVersion += 1;
+    this.markTranscriptDirty({ resetSummary: false, saveIndex: false, bumpStateVersion: true });
     const entry = this.convCache.get(cleanId);
     const defaultTitle = entry
       ? (entry.title || entry.firstPrompt || entry.lastPrompt || ('Conversation ' + cleanId.slice(0, 8)))
@@ -3342,10 +3342,10 @@ class AgyCockpitServer {
 
   refreshProjectsRegistry(force = false) {
     const now = Date.now();
-    if (!force && now - this.lastProjectsScanMs < 1500) {
+    if (!force && now - this.lastProjectsCheckMs < 2000) {
       return;
     }
-    this.lastProjectsScanMs = now;
+    this.lastProjectsCheckMs = now;
 
     let dirStat = null;
     try {
@@ -3353,6 +3353,7 @@ class AgyCockpitServer {
     } catch {}
 
     if (!dirStat || !dirStat.isDirectory()) {
+      this.lastProjectsDirMtimeMs = 0;
       if (this.projectsRegistry.size > 0) {
         this.projectsRegistry.clear();
         this.projectFileMtimes.clear();
@@ -3363,6 +3364,17 @@ class AgyCockpitServer {
       }
       return;
     }
+
+    if (
+      !force &&
+      this.projectsRegistry.size > 0 &&
+      dirStat.mtimeMs === this.lastProjectsDirMtimeMs &&
+      now - this.lastProjectsScanMs < 15000
+    ) {
+      return;
+    }
+    this.lastProjectsDirMtimeMs = dirStat.mtimeMs;
+    this.lastProjectsScanMs = now;
 
     let dirents = [];
     try {
@@ -3512,28 +3524,10 @@ class AgyCockpitServer {
 
   refreshSingleEntry(convId) {
     if (!UUID_RE.test(convId)) return null;
-    const transcriptPath = path.join(this.brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
-    let stat;
-    try {
-      stat = fs.statSync(transcriptPath, { throwIfNoEntry: false });
-    } catch {
-      stat = null;
+    if (this.refreshEntryById(convId, '', '', true)) {
+      this.markTranscriptDirty();
     }
-    if (!stat || !stat.isFile()) {
-      return this.convCache.get(convId) || null;
-    }
-    const existing = this.convCache.get(convId);
-    const res = updateTranscriptEntry(convId, transcriptPath, existing, stat);
-    if (!res) return existing || null;
-    const metaChanged = this.applyEntryMetadata(res.entry, convId, '', '', true);
-    if (res.changed || metaChanged) {
-      this.convCache.set(convId, res.entry);
-      this.transcriptRev += 1;
-      this.cachedIndexSummary = null;
-      this.cachedCardsState = null;
-      this.scheduleSaveIndexCache();
-    }
-    return res.entry;
+    return this.convCache.get(convId) || null;
   }
 
   refreshEntryById(convId, activeConvId, activeWorkspaceNorm, forceAnnot) {
@@ -3573,6 +3567,11 @@ class AgyCockpitServer {
       brainStat = fs.statSync(this.brainDir, { throwIfNoEntry: false });
     } catch {}
 
+    let annotDirMtimeMs = 0;
+    try {
+      annotDirMtimeMs = fs.statSync(this.annotationsDir, { throwIfNoEntry: false })?.mtimeMs || 0;
+    } catch {}
+
     if (brainStat && brainStat.isDirectory()) {
       const brainMtimeMs = brainStat.mtimeMs || 0;
       const doFullScan =
@@ -3584,6 +3583,7 @@ class AgyCockpitServer {
       if (doFullScan) {
         this.lastFullScanMs = now;
         this.lastBrainDirMtimeMs = brainMtimeMs;
+        this.lastAnnotationsDirMtimeMs = annotDirMtimeMs;
 
         let dirents = [];
         try {
@@ -3673,10 +3673,13 @@ class AgyCockpitServer {
           }
         }
 
-        for (const [convId, entry] of this.convCache.entries()) {
-          if (entry.isSubagent || hotIds.has(convId)) continue;
-          if (this.applyEntryMetadata(entry, convId, activeConvId, activeWorkspaceNorm, false)) {
-            anyTranscriptChanged = true;
+        if (annotDirMtimeMs !== this.lastAnnotationsDirMtimeMs) {
+          this.lastAnnotationsDirMtimeMs = annotDirMtimeMs;
+          for (const [convId, entry] of this.convCache.entries()) {
+            if (entry.isSubagent || hotIds.has(convId)) continue;
+            if (this.applyEntryMetadata(entry, convId, activeConvId, activeWorkspaceNorm, false)) {
+              anyTranscriptChanged = true;
+            }
           }
         }
       }
@@ -3725,9 +3728,7 @@ class AgyCockpitServer {
     const globalObservedCeiling = computeMedian(allRecentCompactTokens);
 
     if (anyTranscriptChanged) {
-      this.transcriptRev += 1;
-      this.cachedCardsState = null;
-      this.scheduleSaveIndexCache();
+      this.markTranscriptDirty({ resetSummary: false, saveIndex: true });
     }
 
     const summary = {
@@ -3863,8 +3864,8 @@ class AgyCockpitServer {
     const cleanId = (convId || '').trim().toLowerCase();
     if (!UUID_RE.test(cleanId)) return '';
     const entry = this.convCache.get(cleanId) || this.refreshSingleEntry(cleanId);
-    if (!force && entry && entry.modelEnum && entry.modelResolvedMtimeMs === entry.mtimeMs) {
-      return entry.modelEnum;
+    if (!force && entry && entry.modelResolvedMtimeMs === entry.mtimeMs && entry.mtimeMs > 0) {
+      return entry.modelEnum || '';
     }
     if (this.modelResolveInFlight.has(cleanId)) {
       return (entry && entry.modelEnum) || '';
@@ -3928,8 +3929,10 @@ class AgyCockpitServer {
         }
       }
       const targetEntry = this.convCache.get(cleanId) || entry;
-      if (targetEntry && (!res || !res.error)) {
-        targetEntry.modelResolvedMtimeMs = targetEntry.mtimeMs || Date.now();
+      if (targetEntry && (!res || !res.error || Number(res.statusCode) >= 400)) {
+        const nextResolvedMtime = targetEntry.mtimeMs || Date.now();
+        const mtimeRecordedChanged = targetEntry.modelResolvedMtimeMs !== nextResolvedMtime;
+        targetEntry.modelResolvedMtimeMs = nextResolvedMtime;
         if (foundEnum) {
           const resolvedLabel = foundLabel || this.lookupModelLabel(foundEnum) || '';
           if (
@@ -3938,10 +3941,12 @@ class AgyCockpitServer {
           ) {
             targetEntry.modelEnum = foundEnum;
             if (resolvedLabel) targetEntry.modelLabel = resolvedLabel;
-            this.transcriptRev += 1;
-            this.cachedCardsState = null;
+            this.markTranscriptDirty({ resetSummary: false, saveIndex: true });
+          } else if (mtimeRecordedChanged) {
             this.scheduleSaveIndexCache();
           }
+        } else if (mtimeRecordedChanged) {
+          this.scheduleSaveIndexCache();
         }
       }
       return foundEnum || (targetEntry && targetEntry.modelEnum) || '';
@@ -4156,8 +4161,7 @@ class AgyCockpitServer {
                 breakdownProbeError = bdErr && bdErr.message ? bdErr.message : String(bdErr);
               }
             }
-            const raw = fs.readFileSync(item.trPath, 'utf-8');
-            const lines = raw.split(/\r?\n/).filter(Boolean).slice(-80);
+            const lines = readFileTailLines(item.trPath, 512 * 1024, 80);
             for (const line of lines) {
               let obj;
               try {
@@ -4377,6 +4381,7 @@ class AgyCockpitServer {
         'send-message',
         'new-conversation'
       ];
+      const symbolsKey = allSymbolsToScan.join(',');
       const binScan = scanBinarySymbols(lsBinPath, allSymbolsToScan);
       const nextBinarySig = lsBinPath && binScan.mtimeMs > 0
         ? `${lsBinPath}|${binScan.mtimeMs}|${binScan.size}`
@@ -4385,11 +4390,18 @@ class AgyCockpitServer {
         options.agyUpdated ||
         (this.lastKnownBinarySig && nextBinarySig && this.lastKnownBinarySig !== nextBinarySig)
       );
-      if (nextBinarySig && nextBinarySig !== this.lastKnownBinarySig) {
+      if (
+        nextBinarySig &&
+        !binScan.error &&
+        (nextBinarySig !== this.lastKnownBinarySig || symbolsKey !== this.lastKnownSymbolsKey)
+      ) {
         this.lastKnownBinarySig = nextBinarySig;
+        this.lastKnownSymbolsKey = symbolsKey;
         try {
           writeJsonAtomic(this.diagnosticsCachePath, {
             binarySig: nextBinarySig,
+            symbolsKey,
+            foundSymbols: [...binScan.found],
             updatedAtMs: Date.now()
           });
         } catch {}
@@ -4587,12 +4599,11 @@ class AgyCockpitServer {
         'sendMessage',
         'startConversation',
         'toggleConversation',
+        'toggleAuxPane',
         'getWorkspaceUris',
         'onWorkspaceChange'
       ];
       const missingBridge = requiredBridgeTokens.filter((t) => !preloadContent.includes(t));
-      const sdkPreloadPath = path.join(this.appDataDir, 'lib', 'node_modules', 'sidecar_sdk', 'preload.js');
-      const usingSdkPreload = isFile(sdkPreloadPath);
       const warmRefreshMs = Number((this.lastRefreshDurationMs || 0).toFixed(2));
       if (missingBridge.length > 0) {
         addContract(
@@ -4609,7 +4620,7 @@ class AgyCockpitServer {
           'Sidecar Preload Bridge & Performance Budget',
           'warn',
           'server.cjs:refreshIndex, handleStatusRequest',
-          `Bridge OK (${usingSdkPreload ? 'sdk preload.js' : 'FALLBACK_PRELOAD_JS'}), but last /api/status refresh took ${warmRefreshMs} ms (target < 5 ms warm).`,
+          `Bridge OK (built-in preload.js), but last /api/status refresh took ${warmRefreshMs} ms (target < 5 ms warm).`,
           'Check incremental parsing and mtimeMs caches in server.cjs:refreshIndex().'
         );
       } else {
@@ -4618,7 +4629,7 @@ class AgyCockpitServer {
           'Sidecar Preload Bridge & Performance Budget',
           'pass',
           'server.cjs:loadPreloadJs, handleStatusRequest',
-          `Bridge OK (${usingSdkPreload ? 'sdk preload.js' : 'FALLBACK_PRELOAD_JS'}), warm /api/status refresh=${warmRefreshMs} ms.`
+          `Bridge OK (built-in preload.js), warm /api/status refresh=${warmRefreshMs} ms.`
         );
       }
 
@@ -5104,6 +5115,14 @@ class AgyCockpitServer {
       try {
         this.cachedUiMtimeMs = Math.floor(fs.statSync(this.uiHtmlPath, { throwIfNoEntry: false })?.mtimeMs || 0);
       } catch {}
+      if (this.bootScriptMtimeMs > 0) {
+        try {
+          const curScriptMtime = fs.statSync(__filename, { throwIfNoEntry: false })?.mtimeMs || 0;
+          if (curScriptMtime > 0 && curScriptMtime !== this.bootScriptMtimeMs) {
+            this.scriptChangedOnDisk = true;
+          }
+        } catch {}
+      }
     }
     const uiMtimeMs = this.cachedUiMtimeMs;
 
@@ -5122,17 +5141,29 @@ class AgyCockpitServer {
       !this.deletedConvIds.has(hostConvId) &&
       !cards.some((c) => c.id === hostConvId)
     ) {
+      const isWorkspaceVisible = (wsPath) => {
+        if (!hasProjectsRegistry || !wsPath) return true;
+        const proj = this.matchProjectForWorkspace(wsPath);
+        return Boolean(proj && !proj.archived);
+      };
       const hostEntry = sortedEntries.find((e) => e.id === hostConvId);
-      if (hostEntry && !hostEntry.archived && !hostEntry.isSubagent) {
+      if (
+        hostEntry &&
+        !hostEntry.archived &&
+        !hostEntry.isSubagent &&
+        isWorkspaceVisible(hostEntry.workspacePath)
+      ) {
         cards = [this.buildConversationCard(hostEntry, globalObservedCeiling, subagentTokens), ...cards];
       } else if (!hostEntry) {
         const cachedWs = this.metadataWorkspaceCache.get(hostConvId) || '';
         const candidateWs = cachedWs === '__general__'
           ? ''
           : (detectedActiveWorkspaceNorm || cachedWs || '');
-        const placeholderEntry = createEmptyEntry(hostConvId);
-        placeholderEntry.workspacePath = candidateWs;
-        cards = [this.buildConversationCard(placeholderEntry, globalObservedCeiling, subagentTokens), ...cards];
+        if (isWorkspaceVisible(candidateWs)) {
+          const placeholderEntry = createEmptyEntry(hostConvId);
+          placeholderEntry.workspacePath = candidateWs;
+          cards = [this.buildConversationCard(placeholderEntry, globalObservedCeiling, subagentTokens), ...cards];
+        }
       }
     }
 
@@ -5357,16 +5388,11 @@ class AgyCockpitServer {
     if (req.method === 'GET' && pathname === '/api/status') {
       const payload = this.handleStatusRequest(query);
       sendJson(res, 200, payload);
-      if (this.bootScriptMtimeMs > 0) {
-        try {
-          const curMtime = fs.statSync(__filename, { throwIfNoEntry: false })?.mtimeMs || 0;
-          if (curMtime > 0 && curMtime !== this.bootScriptMtimeMs) {
-            this.bootScriptMtimeMs = 0;
-            setImmediate(() => {
-              this.stop().finally(() => process.exit(0));
-            });
-          }
-        } catch {}
+      if (this.scriptChangedOnDisk && this.bootScriptMtimeMs > 0) {
+        this.bootScriptMtimeMs = 0;
+        setImmediate(() => {
+          this.stop().finally(() => process.exit(0));
+        });
       }
       return;
     }
@@ -5406,12 +5432,13 @@ class AgyCockpitServer {
     }
 
     if (req.method === 'GET' && pathname === '/api/models') {
-      const catalog = await this.getModelsCatalog(query.refresh === '1');
+      const forceRefresh = query.refresh === '1';
+      const catalog = await this.getModelsCatalog(forceRefresh);
       const qConvId = typeof query.convId === 'string' ? query.convId.trim().toLowerCase() : '';
       let convModelEnum = '';
       let convModelLabel = '';
       if (UUID_RE.test(qConvId)) {
-        const resolvedEnum = await this.resolveConversationModelAsync(qConvId, false);
+        const resolvedEnum = await this.resolveConversationModelAsync(qConvId, forceRefresh);
         const entry = this.convCache.get(qConvId);
         convModelEnum = resolvedEnum || (entry && entry.modelEnum) || '';
         convModelLabel = (entry && entry.modelLabel) || this.lookupModelLabel(convModelEnum);
@@ -5512,6 +5539,18 @@ class AgyCockpitServer {
         return;
       }
       const cleanConvId = convId.toLowerCase();
+      const markSentSuccess = () => {
+        const target = this.convCache.get(cleanConvId);
+        if (target) {
+          const nowMs = Date.now();
+          target.lastActiveIso = new Date(nowMs).toISOString();
+          target.lastActiveMs = Math.max(target.lastActiveMs || 0, nowMs);
+          if (isSmartHandoffRequestText(message)) {
+            target.awaitingHandoffResponse = true;
+          }
+          this.markTranscriptDirty({ resetSummary: true, saveIndex: false });
+        }
+      };
       const sendRpc = await callLanguageServerRpc(
         'SendUserCascadeMessage',
         {
@@ -5523,6 +5562,7 @@ class AgyCockpitServer {
         12000
       );
       if (sendRpc && !sendRpc.error) {
+        markSentSuccess();
         sendJson(res, 200, { response: sendRpc });
         return;
       }
@@ -5539,6 +5579,7 @@ class AgyCockpitServer {
         sendJson(res, 502, out);
         return;
       }
+      markSentSuccess();
       sendJson(res, 200, out);
       return;
     }
@@ -5642,10 +5683,7 @@ class AgyCockpitServer {
           rebuildSearchCorpus(preEntry);
         }
         this.convCache.set(cleanNewId, preEntry);
-        this.transcriptRev += 1;
-        this.cachedIndexSummary = null;
-        this.cachedCardsState = null;
-        this.scheduleSaveIndexCache();
+        this.markTranscriptDirty();
       };
 
       const baseStartPayload = {
@@ -5686,7 +5724,6 @@ class AgyCockpitServer {
         '';
       const cascadeId = rawCascadeId.trim().toLowerCase();
       if (cascadeId && UUID_RE.test(cascadeId)) {
-        seedNewConversation(cascadeId);
         const sendPayload = {
           cascadeId,
           items: [{ text: message }],

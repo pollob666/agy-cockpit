@@ -1959,7 +1959,11 @@
         if (state.selectedWorkspaceKey !== '__auto__') {
           return state.selectedWorkspaceKey;
         }
-        if (activeCard && activeCard.workspaceKey) {
+        if (
+          activeCard &&
+          activeCard.workspaceKey &&
+          state.workspaces.some((w) => w.key === activeCard.workspaceKey)
+        ) {
           return activeCard.workspaceKey;
         }
         if (activeCard && !activeCard.workspaceKey && activeCard.promptCount > 0) {
@@ -1967,7 +1971,10 @@
             return '__unscoped__';
           }
         }
-        if (state.activeWorkspaceKey) {
+        if (
+          state.activeWorkspaceKey &&
+          state.workspaces.some((w) => w.key === state.activeWorkspaceKey)
+        ) {
           return state.activeWorkspaceKey;
         }
         return '__all__';
@@ -4228,9 +4235,12 @@
         }).catch(() => {});
       }
 
-      function pickFallbackConversationAfterRemove(removedConvId) {
+      function pickFallbackConversationAfterRemove(shouldExclude) {
+        const matchFn = typeof shouldExclude === 'function'
+          ? shouldExclude
+          : (c) => c.id === shouldExclude;
         const remaining = state.conversations.filter(
-          (c) => !c.isSubagent && c.id !== removedConvId
+          (c) => !c.isSubagent && !matchFn(c)
         );
         if (remaining.length === 0) return null;
         if (state.activeWorkspaceKey) {
@@ -4238,6 +4248,53 @@
           if (sameWs.length > 0) return sameWs[0];
         }
         return remaining[0];
+      }
+
+      async function evictPinnedConversationIfMatching(shouldExclude, delayMs = 0) {
+        const matchFn = typeof shouldExclude === 'function'
+          ? shouldExclude
+          : (c) => c.id === shouldExclude;
+        const isIdExcluded = (id) => {
+          if (!id) return false;
+          if (typeof shouldExclude === 'string') return id === shouldExclude;
+          const card = state.conversations.find((c) => c.id === id);
+          return Boolean(card && matchFn(card));
+        };
+        if (isIdExcluded(initialHostConvId)) {
+          initialHostConvId = '';
+        }
+        if (
+          isIdExcluded(state.lastPinnedId) ||
+          isIdExcluded(state.hostConvId) ||
+          isIdExcluded(state.manualPinId)
+        ) {
+          const fallback = pickFallbackConversationAfterRemove(matchFn);
+          if (fallback) {
+            state.hostConvId = fallback.id;
+            state.manualPinId = fallback.id;
+            state.manualPinTs = Date.now();
+            openConversationInHost(fallback.id);
+            if (delayMs > 0) {
+              await new Promise((r) => setTimeout(r, delayMs));
+            }
+          } else {
+            state.hostConvId = '';
+            state.manualPinId = '';
+            state.lastPinnedId = '';
+          }
+        }
+      }
+
+      async function refreshAfterArchiveMutation(keepArchivedModalOpen) {
+        await fetchStatus(true);
+        const totalArch =
+          (Array.isArray(state.archivedProjects) ? state.archivedProjects.length : 0) +
+          (Array.isArray(state.archivedConversations) ? state.archivedConversations.length : 0);
+        if (keepArchivedModalOpen && totalArch > 0 && modalBackdropEl.classList.contains('open')) {
+          openArchivedModal();
+        } else {
+          closeModal();
+        }
       }
 
       async function handlePinConversation(convId, nextPinned) {
@@ -4384,21 +4441,8 @@
         if (!convId) return;
         state.openMenuConvId = null;
         try {
-          if (archived && (convId === state.lastPinnedId || convId === state.hostConvId || convId === initialHostConvId)) {
-            if (convId === initialHostConvId) {
-              initialHostConvId = '';
-            }
-            const fallback = pickFallbackConversationAfterRemove(convId);
-            if (fallback) {
-              state.hostConvId = fallback.id;
-              state.manualPinId = fallback.id;
-              state.manualPinTs = Date.now();
-              openConversationInHost(fallback.id);
-            } else {
-              state.hostConvId = '';
-              state.manualPinId = '';
-              state.lastPinnedId = '';
-            }
+          if (archived) {
+            await evictPinnedConversationIfMatching(convId, 0);
           }
           const res = await apiFetch('/api/conversation-archive', {
             method: 'POST',
@@ -4409,15 +4453,7 @@
           if (!res.ok || data.error) {
             throw new Error(data.error || 'Failed to update conversation');
           }
-          await fetchStatus(true);
-          const totalArch =
-            (Array.isArray(state.archivedProjects) ? state.archivedProjects.length : 0) +
-            (Array.isArray(state.archivedConversations) ? state.archivedConversations.length : 0);
-          if (!archived && totalArch > 0 && modalBackdropEl.classList.contains('open')) {
-            openArchivedModal();
-          } else {
-            closeModal();
-          }
+          await refreshAfterArchiveMutation(!archived);
           showToast(archived ? 'Archived conversation' : 'Restored conversation');
         } catch (err) {
           closeModal();
@@ -4450,23 +4486,7 @@
         if (!convId) return;
         state.openMenuConvId = null;
         try {
-          if (convId === state.lastPinnedId || convId === state.hostConvId || convId === initialHostConvId) {
-            if (convId === initialHostConvId) {
-              initialHostConvId = '';
-            }
-            const fallback = pickFallbackConversationAfterRemove(convId);
-            if (fallback) {
-              state.hostConvId = fallback.id;
-              state.manualPinId = fallback.id;
-              state.manualPinTs = Date.now();
-              openConversationInHost(fallback.id);
-              await new Promise((r) => setTimeout(r, 120));
-            } else {
-              state.hostConvId = '';
-              state.manualPinId = '';
-              state.lastPinnedId = '';
-            }
-          }
+          await evictPinnedConversationIfMatching(convId, 120);
           const res = await apiFetch('/api/conversation-delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -4479,16 +4499,15 @@
           state.expandedDetails.delete(convId);
           state.expandedSubagents.delete(convId);
           state.handoffStateByConv.delete(convId);
-          if (state.openHandoffId === convId) state.openHandoffId = null;
-          await fetchStatus(true);
-          const totalArch =
-            (Array.isArray(state.archivedProjects) ? state.archivedProjects.length : 0) +
-            (Array.isArray(state.archivedConversations) ? state.archivedConversations.length : 0);
-          if (fromArchivedModal && totalArch > 0 && modalBackdropEl.classList.contains('open')) {
-            openArchivedModal();
-          } else {
-            closeModal();
+          const keyPrefix = convId + ':';
+          for (const k of [...state.expandedPromptKeys]) {
+            if (k.startsWith(keyPrefix)) state.expandedPromptKeys.delete(k);
           }
+          for (const k of state.scrollPositions.keys()) {
+            if (k === convId || k.startsWith(keyPrefix)) state.scrollPositions.delete(k);
+          }
+          if (state.openHandoffId === convId) state.openHandoffId = null;
+          await refreshAfterArchiveMutation(fromArchivedModal);
           showToast('Deleted conversation');
         } catch (err) {
           closeModal();
@@ -4576,6 +4595,12 @@
       async function handleSetProjectArchived(projectId, projectName, archived, wsKey) {
         if (!projectId) return;
         try {
+          if (archived) {
+            await evictPinnedConversationIfMatching(
+              (c) => c.projectId === projectId || Boolean(wsKey && c.workspaceKey === wsKey),
+              0
+            );
+          }
           const res = await apiFetch('/api/project-archive', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -4588,15 +4613,7 @@
           if (archived && wsKey && state.selectedWorkspaceKey === wsKey) {
             state.selectedWorkspaceKey = '__auto__';
           }
-          await fetchStatus(true);
-          const totalArch =
-            (Array.isArray(state.archivedProjects) ? state.archivedProjects.length : 0) +
-            (Array.isArray(state.archivedConversations) ? state.archivedConversations.length : 0);
-          if (!archived && totalArch > 0 && modalBackdropEl.classList.contains('open')) {
-            openArchivedModal();
-          } else {
-            closeModal();
-          }
+          await refreshAfterArchiveMutation(!archived);
           showToast((archived ? 'Archived ' : 'Unarchived ') + (projectName || 'project'));
         } catch (err) {
           closeModal();
