@@ -1119,7 +1119,7 @@ function classifyToolCallsWait(toolCalls) {
 }
 
 function getEntryWaitState(entry, nowMs = Date.now()) {
-  if (!entry) return '';
+  if (!entry || entry.lastStepStatus === 'CANCELED') return '';
   if (entry.lastStepType !== 'PLANNER_RESPONSE' || !entry.lastStepHasToolCalls) return '';
   const kind = entry.lastStepWaitKind || '';
   if (kind !== 'permission' && kind !== 'question') return '';
@@ -1133,7 +1133,7 @@ function getEntryWaitState(entry, nowMs = Date.now()) {
 }
 
 function isEntryThinking(entry, nowMs = Date.now()) {
-  if (!entry) return false;
+  if (!entry || entry.lastStepStatus === 'CANCELED') return false;
   if (getEntryWaitState(entry, nowMs)) return false;
   if (entry.handoffRpcPendingMs && nowMs - entry.handoffRpcPendingMs < 30000) return true;
   const lastAct = Math.max(entry.mtimeMs || 0, entry.lastStepMs || 0, entry.lastActiveMs || 0);
@@ -1265,6 +1265,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
         if (createdMs > 0) {
           entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
         }
+        entry.lastStepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
         entry.lastStepHasToolCalls = false;
         entry.lastStepIsCompletedReply = false;
         entry.lastStepWaitKind = '';
@@ -1442,6 +1443,8 @@ function processTranscriptLine(entry, line, isFirstLine) {
       !wasAwaitingHandoff &&
       !hasTools &&
       stepStatus !== 'RUNNING' &&
+      stepStatus !== 'CANCELED' &&
+      stepStatus !== 'ERROR' &&
       (entry.promptCount > 0 || entry.lastModelResponse)
     );
     entry.lastStepIsCompletedReply = isCompletedReply;
@@ -2961,6 +2964,7 @@ class AgyCockpitServer {
     this.deletedConvIds = new Set();
     this.metadataWorkspaceCache = new Map();
     this.lsTrajectoryMeta = new Map();
+    this.lsCheckedMissingConvs = new Map();
     this.lsTrajectoriesFetchedAtMs = 0;
     this.lsTrajectoriesFetchPromise = null;
     this.trajectoriesInitialSyncDone = false;
@@ -3322,12 +3326,14 @@ class AgyCockpitServer {
     if (!force && this.trajectoriesInitialSyncDone) {
       let hasUnsyncedMainConv = false;
       for (const [cid, e] of this.convCache.entries()) {
-        if (e && !e.isSubagent && !this.lsTrajectoryMeta.has(cid)) {
+        if (!e || e.isSubagent) continue;
+        if ((!this.lsTrajectoryMeta.has(cid) && this.lsCheckedMissingConvs.get(cid) !== (e.mtimeMs || 0)) || isEntryThinking(e, now) || getEntryWaitState(e, now)) {
           hasUnsyncedMainConv = true;
           break;
         }
       }
-      if (!hasUnsyncedMainConv && now - this.lsTrajectoriesFetchedAtMs < 3000) {
+      const minIntervalMs = hasUnsyncedMainConv ? 1000 : 12000;
+      if (now - this.lsTrajectoriesFetchedAtMs < minIntervalMs) {
         return Promise.resolve(false);
       }
     }
@@ -3337,6 +3343,7 @@ class AgyCockpitServer {
       let metaCacheDirty = false;
       try {
         this.refreshProjectsRegistry(false);
+        const syncStartedAtMs = Date.now();
         const res = await callLanguageServerRpc(
           'GetAllCascadeTrajectories',
           { excludeSubtrajectories: true },
@@ -3404,6 +3411,7 @@ class AgyCockpitServer {
             summary: lsSummary,
             annotTitle
           });
+          this.lsCheckedMissingConvs.delete(cleanId);
 
           const nextCacheVal =
             officialProjectId || resolvedWsPath
@@ -3444,6 +3452,25 @@ class AgyCockpitServer {
               rebuildSearchCorpus(entry);
               anyChanged = true;
             }
+            const lastAct = Math.max(entry.mtimeMs || 0, entry.lastStepMs || 0, entry.lastUserInputMs || 0);
+            const idleGraceMs = summary.latestExecutorTerminationReason === 'EXECUTOR_TERMINATION_REASON_USER_CANCELED' ? 0 : 1500;
+            if (
+              (isEntryThinking(entry, syncStartedAtMs) || getEntryWaitState(entry, syncStartedAtMs)) &&
+              (summary.status === 'CASCADE_RUN_STATUS_CANCELING' ||
+                (summary.status === 'CASCADE_RUN_STATUS_IDLE' && !summary.waitingSteps?.length && syncStartedAtMs >= lastAct + idleGraceMs))
+            ) {
+              entry.lastStepStatus = 'CANCELED';
+              entry.awaitingHandoffResponse = false;
+              entry.handoffRpcPendingMs = 0;
+              anyChanged = true;
+            }
+          }
+        }
+
+        for (const [cid, e] of this.convCache.entries()) {
+          if (!e || e.isSubagent) continue;
+          if (!this.lsTrajectoryMeta.has(cid)) {
+            this.lsCheckedMissingConvs.set(cid, e.mtimeMs || 0);
           }
         }
 
@@ -3664,6 +3691,10 @@ class AgyCockpitServer {
         changed = true;
       }
     }
+    // Strip marked_as_unread from .pbtxt BEFORE reading annot.mtimeMs into targetMs below. Otherwise:
+    // (1) the .pbtxt rewrite itself would leave annot.mtimeMs > lastSeenMs, and (2) when Antigravity
+    // stamps last_user_view_time ~60 ms after a Cockpit open-chat click, a leftover marked_as_unread: true
+    // in .pbtxt would satisfy annot.mtimeMs > lastSeenMs in applyEntryMetadata and re-light the dot.
     const prevAnnot = this.annotationTitleCache.get(cleanId);
     if (entry.markedAsUnread || entry.manualUnreadAtMs > 0 || (prevAnnot && prevAnnot.markedAsUnread)) {
       this.clearConversationUnreadAnnotation(cleanId);
@@ -3755,6 +3786,10 @@ class AgyCockpitServer {
     const annot = this.resolveConversationAnnotation(cleanId, true);
     const entry = this.convCache.get(cleanId);
     if (entry) {
+      // Keep lastSeenMs >= minBaselineMs (so if the user later clicks "Mark as read" in the native side
+      // nav, which only removes marked_as_unread from .pbtxt without bumping last_user_view_time, an old
+      // reply does not stay unread), while clamping <= annot.mtimeMs - 1 so applyEntryMetadata's
+      // (annot.mtimeMs > lastSeenMs) check stays true.
       const minBaselineMs = Math.max(
         entry.lastModelResponseMs || 0,
         entry.lastViewMs || 0,
@@ -3897,6 +3932,7 @@ class AgyCockpitServer {
     this.convCache.delete(cleanId);
     this.deletedConvIds.add(cleanId);
     this.lsTrajectoryMeta.delete(cleanId);
+    this.lsCheckedMissingConvs.delete(cleanId);
     if (this.pendingCustomTitleSync) {
       this.pendingCustomTitleSync.delete(cleanId);
     }
@@ -4649,11 +4685,24 @@ class AgyCockpitServer {
     }
   }
 
+  needsModelResolution(entry) {
+    if (!entry || entry.isSubagent || !(entry.mtimeMs > 0)) return false;
+    if (!entry.modelEnum) {
+      if (entry.lastStepType === 'USER_INPUT' && !entry.lastPlannerTokens) return false;
+      return entry.modelResolvedMtimeMs !== entry.mtimeMs;
+    }
+    return (
+      entry.lastUserInputMs > 0 &&
+      entry.modelResolvedMtimeMs < entry.lastUserInputMs &&
+      entry.lastStepType !== 'USER_INPUT'
+    );
+  }
+
   async resolveConversationModelAsync(convId, force = false) {
     const cleanId = (convId || '').trim().toLowerCase();
     if (!UUID_RE.test(cleanId)) return '';
     const entry = this.convCache.get(cleanId) || this.refreshSingleEntry(cleanId);
-    if (!force && entry && entry.modelResolvedMtimeMs === entry.mtimeMs && entry.mtimeMs > 0) {
+    if (!force && entry && !this.needsModelResolution(entry)) {
       return entry.modelEnum || '';
     }
     if (this.modelResolveInFlight.has(cleanId)) {
@@ -4666,25 +4715,14 @@ class AgyCockpitServer {
     this.modelResolveInFlight.add(cleanId);
     this.modelResolveCooldown.set(cleanId, Date.now());
     try {
-      let res = await callLanguageServerRpc('GetCascadeTrajectoryGeneratorMetadata', {
+      const res = await callLanguageServerRpc('GetCascadeTrajectoryGeneratorMetadata', {
         cascadeId: cleanId,
         generatorMetadataOffset: 0,
         includeMessages: false
       });
-      let list = Array.isArray(res && res.generatorMetadata)
+      const list = Array.isArray(res && res.generatorMetadata)
         ? res.generatorMetadata
         : (Array.isArray(res && res.data && res.data.generatorMetadata) ? res.data.generatorMetadata : []);
-      if (list.length === 0) {
-        await callLanguageServerRpc('LoadTrajectory', { cascadeId: cleanId }, 3000);
-        res = await callLanguageServerRpc('GetCascadeTrajectoryGeneratorMetadata', {
-          cascadeId: cleanId,
-          generatorMetadataOffset: 0,
-          includeMessages: false
-        });
-        list = Array.isArray(res && res.generatorMetadata)
-          ? res.generatorMetadata
-          : (Array.isArray(res && res.data && res.data.generatorMetadata) ? res.data.generatorMetadata : []);
-      }
       let foundEnum = '';
       let foundLabel = '';
       for (let i = list.length - 1; i >= 0; i--) {
@@ -4719,7 +4757,10 @@ class AgyCockpitServer {
       }
       const targetEntry = this.convCache.get(cleanId) || entry;
       if (targetEntry && (!res || !res.error || Number(res.statusCode) >= 400)) {
-        const nextResolvedMtime = targetEntry.mtimeMs || Date.now();
+        const hasAnyModel = Boolean(foundEnum || targetEntry.modelEnum);
+        const nextResolvedMtime = hasAnyModel
+          ? Math.max(targetEntry.mtimeMs || 0, targetEntry.lastUserInputMs || 0, Date.now())
+          : (targetEntry.mtimeMs || Date.now());
         const mtimeRecordedChanged = targetEntry.modelResolvedMtimeMs !== nextResolvedMtime;
         targetEntry.modelResolvedMtimeMs = nextResolvedMtime;
         if (foundEnum) {
@@ -4752,23 +4793,22 @@ class AgyCockpitServer {
     void this.refreshQuotaSummary();
     const candidateIds = [];
     if (hostConvId && UUID_RE.test(hostConvId)) {
-      candidateIds.push(hostConvId);
+      const hostEntry = this.convCache.get(hostConvId);
+      if (hostEntry && this.needsModelResolution(hostEntry)) {
+        candidateIds.push(hostConvId);
+      }
     }
     if (Array.isArray(visibleEntries)) {
       for (const e of visibleEntries) {
         if (!e || e.isSubagent) continue;
-        if (!candidateIds.includes(e.id)) {
+        if (!candidateIds.includes(e.id) && this.needsModelResolution(e)) {
           candidateIds.push(e.id);
         }
         if (candidateIds.length >= 4) break;
       }
     }
     for (const cid of candidateIds) {
-      const entry = this.convCache.get(cid);
-      if (!entry) continue;
-      if (entry.mtimeMs > 0 && entry.modelResolvedMtimeMs !== entry.mtimeMs) {
-        void this.resolveConversationModelAsync(cid, false);
-      }
+      void this.resolveConversationModelAsync(cid, false);
     }
   }
 
@@ -5666,6 +5706,8 @@ class AgyCockpitServer {
     if (UUID_RE.test(viewedConvId)) {
       const viewedEntry = this.convCache.get(viewedConvId);
       const viewedState = viewedEntry ? this.resolveSubagentsState(viewedEntry) : null;
+      // Guard !viewedEntry.markedAsUnread on the server too: an /api/status?viewedConvId=... poll can
+      // already be in flight with stale client state when the user clicks "Mark as unread".
       if (viewedEntry && !viewedEntry.markedAsUnread && viewedState && !viewedState.isThinking && !viewedState.waitState) {
         const myFocusMs = Math.max(viewedEntry.lastViewMs || 0, viewedEntry.lastUserInputMs || 0);
         let newerFocusElsewhere = false;
@@ -6421,11 +6463,13 @@ class AgyCockpitServer {
       }
       const entry = this.convCache.get(convId);
       if (entry) {
+        entry.lastStepStatus = 'CANCELED';
         entry.awaitingHandoffResponse = false;
         entry.handoffRpcPendingMs = 0;
         entry.lastHandoffStepIndex = -1;
         entry.needsFullHandoffRead = false;
         entry.handoffTargetStepIndex = -1;
+        this.markTranscriptDirty({ resetSummary: false, saveIndex: true, bumpStateVersion: true });
       }
       const rpcRes = await callLanguageServerRpc('CancelCascadeInvocation', { cascadeId: convId }, 4000);
       sendJson(res, 200, { ok: Boolean(!rpcRes || !rpcRes.error) });
