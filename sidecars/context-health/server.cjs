@@ -1346,6 +1346,183 @@ class GitRepoCache {
   }
 }
 
+const LSRPC_CONTRACT_SPECS = [
+  {
+    method: 'GetCascadeModelConfigData',
+    critical: true,
+    caller: 'server.cjs:getModelsCatalog, parseCascadeModelConfigs',
+    purpose: 'Fetch available model catalog and default model'
+  },
+  {
+    method: 'GetCascadeTrajectoryGeneratorMetadata',
+    critical: true,
+    caller: 'server.cjs:resolveConversationModelAsync',
+    purpose: 'Resolve active model used by a conversation'
+  },
+  {
+    method: 'LoadTrajectory',
+    critical: false,
+    caller: 'server.cjs:resolveConversationModelAsync',
+    purpose: 'Warm trajectory in Language Server before reading generator metadata'
+  },
+  {
+    method: 'StartCascade',
+    critical: false,
+    caller: 'server.cjs:handleRequest (POST /_sidecar/new-conversation)',
+    purpose: 'Create new conversation via Language Server RPC (falls back to agentapi CLI)'
+  },
+  {
+    method: 'SendUserCascadeMessage',
+    critical: false,
+    caller: 'server.cjs:handleRequest (POST /_sidecar/new-conversation)',
+    purpose: 'Send initial user prompt to new cascade (falls back to agentapi CLI)'
+  },
+  {
+    method: 'UpdateConversationAnnotations',
+    critical: false,
+    caller: 'server.cjs:setConversationArchived',
+    purpose: 'Archive/unarchive conversation via RPC (falls back to .pbtxt file edit)'
+  },
+  {
+    method: 'DeleteCascadeTrajectory',
+    critical: false,
+    caller: 'server.cjs:deleteConversation',
+    purpose: 'Delete trajectory via RPC (falls back to on-disk brain/conversations/annotations removal)'
+  }
+];
+
+const binarySymbolCache = new Map();
+
+function resolveLanguageServerBinary(appDataDir) {
+  const geminiRoot = path.join(os.homedir(), '.gemini');
+  const candidateDirs = [
+    appDataDir || resolveAppDataDir(),
+    ...APP_CANDIDATES.map((app) => path.join(geminiRoot, app))
+  ].filter(Boolean);
+
+  if (process.platform === 'win32') {
+    const localApp = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    const langServer = path.join(localApp, 'Programs', 'antigravity', 'resources', 'bin', 'language_server.exe');
+    if (isFile(langServer)) return langServer;
+    for (const d of candidateDirs) {
+      const bat = path.join(d, 'bin', 'agentapi.bat');
+      if (isFile(bat)) {
+        try {
+          const batContent = fs.readFileSync(bat, 'utf-8');
+          const exeMatch = /"([^"]+\.exe)"/i.exec(batContent);
+          if (exeMatch && isFile(exeMatch[1])) return exeMatch[1];
+        } catch {}
+      }
+    }
+    return '';
+  }
+
+  for (const d of candidateDirs) {
+    const nixBin = path.join(d, 'bin', 'agentapi');
+    if (isFile(nixBin)) {
+      try {
+        const scriptContent = fs.readFileSync(nixBin, 'utf-8');
+        const binMatch = /"([^"\n]+language_server[^"\n]*)"/.exec(scriptContent);
+        if (binMatch && isFile(binMatch[1])) return binMatch[1];
+      } catch {}
+    }
+  }
+
+  const linuxCandidates = [
+    '/opt/Antigravity/resources/bin/language_server_linux_x64',
+    '/opt/Antigravity/resources/bin/language_server',
+    '/opt/antigravity/resources/bin/language_server_linux_x64',
+    '/opt/antigravity/resources/bin/language_server',
+    '/usr/share/antigravity/resources/bin/language_server',
+    path.join(os.homedir(), '.local', 'share', 'antigravity', 'resources', 'bin', 'language_server')
+  ];
+  for (const binPath of linuxCandidates) {
+    if (isFile(binPath)) return binPath;
+  }
+  return '';
+}
+
+function scanBinarySymbols(binaryPath, symbols) {
+  const result = {
+    found: new Set(),
+    missing: [],
+    mtimeMs: 0,
+    size: 0,
+    error: ''
+  };
+  if (!binaryPath || !isFile(binaryPath)) {
+    result.missing = [...symbols];
+    result.error = 'Binary file not found';
+    return result;
+  }
+  let stat;
+  try {
+    stat = fs.statSync(binaryPath);
+  } catch (err) {
+    result.missing = [...symbols];
+    result.error = err.message;
+    return result;
+  }
+  result.mtimeMs = Math.floor(stat.mtimeMs || 0);
+  result.size = stat.size || 0;
+
+  const cacheKey = `${binaryPath}|${result.mtimeMs}|${result.size}|${symbols.join(',')}`;
+  if (binarySymbolCache.has(cacheKey)) {
+    const cachedFound = binarySymbolCache.get(cacheKey);
+    result.found = new Set(cachedFound);
+    result.missing = symbols.filter((s) => !result.found.has(s));
+    return result;
+  }
+
+  const pending = new Map();
+  for (const sym of symbols) {
+    if (sym) pending.set(sym, Buffer.from(sym, 'utf-8'));
+  }
+
+  let fd;
+  try {
+    fd = fs.openSync(binaryPath, 'r');
+    const chunkSize = 4 * 1024 * 1024;
+    const overlap = 256;
+    const buf = Buffer.allocUnsafe(chunkSize + overlap);
+    let pos = 0;
+    let carryLen = 0;
+
+    while (pos < stat.size && pending.size > 0) {
+      const toRead = Math.min(chunkSize, stat.size - pos);
+      const bytesRead = fs.readSync(fd, buf, carryLen, toRead, pos);
+      if (bytesRead <= 0) break;
+      const windowSlice = buf.subarray(0, carryLen + bytesRead);
+      for (const [sym, needle] of pending.entries()) {
+        if (windowSlice.includes(needle)) {
+          result.found.add(sym);
+          pending.delete(sym);
+        }
+      }
+      pos += bytesRead;
+      if (pos < stat.size && pending.size > 0) {
+        carryLen = Math.min(overlap, windowSlice.length);
+        windowSlice.subarray(windowSlice.length - carryLen).copy(buf, 0);
+      }
+    }
+  } catch (err) {
+    result.error = err.message;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+
+  result.missing = symbols.filter((s) => !result.found.has(s));
+  if (!result.error) {
+    if (binarySymbolCache.size > 8) binarySymbolCache.clear();
+    binarySymbolCache.set(cacheKey, [...result.found]);
+  }
+  return result;
+}
+
 function resolveAgentApiCommand(appDataDir) {
   const envExe = process.env.ANTIGRAVITY_AGENTAPI_EXE?.trim();
   if (envExe && isFile(envExe)) {
@@ -1732,8 +1909,15 @@ class ContextHealthServer {
     this.modelsCatalogRev = 1;
     this.initialBootScanDone = false;
 
+    this.diagnosticsState = null;
+    this.diagnosticsPromise = null;
+    this.diagnosticsRev = 1;
+    this.lastBinaryStatCheckMs = 0;
+    this.lastKnownBinarySig = '';
+
     this.indexCachePath = path.join(this.dataDir, 'index_cache.json');
     this.metadataCachePath = path.join(this.dataDir, 'metadata_cache.json');
+    this.diagnosticsCachePath = path.join(this.dataDir, 'diagnostics_cache.json');
     this.serverInfoPath = path.join(this.dataDir, 'server_info.json');
 
     try {
@@ -1746,6 +1930,14 @@ class ContextHealthServer {
   }
 
   loadPersistentCaches() {
+    if (isFile(this.diagnosticsCachePath)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(this.diagnosticsCachePath, 'utf-8'));
+        if (raw && typeof raw.binarySig === 'string') {
+          this.lastKnownBinarySig = raw.binarySig;
+        }
+      } catch {}
+    }
     if (isFile(this.metadataCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.metadataCachePath, 'utf-8'));
@@ -2701,6 +2893,620 @@ class ContextHealthServer {
     }
   }
 
+  checkAgyBinaryChanged(force = false) {
+    const now = Date.now();
+    if (!force && now - this.lastBinaryStatCheckMs < 45000) {
+      return;
+    }
+    this.lastBinaryStatCheckMs = now;
+    const binPath = resolveLanguageServerBinary(this.appDataDir);
+    if (!binPath) return;
+    try {
+      const stat = fs.statSync(binPath, { throwIfNoEntry: false });
+      if (!stat || !stat.isFile()) return;
+      const sig = `${binPath}|${Math.floor(stat.mtimeMs)}|${stat.size}`;
+      if (!this.diagnosticsState) {
+        void this.runDiagnostics({ refresh: false });
+      } else if (this.lastKnownBinarySig && sig !== this.lastKnownBinarySig) {
+        void this.runDiagnostics({ refresh: true, agyUpdated: true });
+      }
+    } catch {}
+  }
+
+  getDiagnosticsStatusPayload(query = {}) {
+    const sim = typeof query.simulateDiag === 'string' ? query.simulateDiag.trim().toLowerCase() : '';
+    if (sim === 'fail' || sim === 'warn') {
+      const isFail = sim === 'fail';
+      const simIssue = {
+        id: 'language_server_binary',
+        title: 'Language Server Binary & RPC Symbols',
+        status: isFail ? 'fail' : 'warn',
+        codeSymbol: 'server.cjs:callLanguageServerRpc',
+        detail: isFail
+          ? 'Simulated failure: RPC GetCascadeModelConfigData not found in language_server binary.'
+          : 'Simulated warning: RPC DeleteCascadeTrajectory not found in language_server binary (using disk fallback).',
+        fixHint: 'Update RPC method name in sidecars/context-health/server.cjs (callLanguageServerRpc callers).'
+      };
+      return {
+        status: isFail ? 'fail' : 'warn',
+        issueCount: 1,
+        failCount: isFail ? 1 : 0,
+        warnCount: isFail ? 0 : 1,
+        signature: `sim:${sim}`,
+        checkedAtMs: Date.now(),
+        agyUpdated: true,
+        issues: [simIssue]
+      };
+    }
+
+    const st = this.diagnosticsState;
+    if (!st) {
+      return {
+        status: 'ok',
+        issueCount: 0,
+        failCount: 0,
+        warnCount: 0,
+        signature: 'ok',
+        checkedAtMs: 0,
+        agyUpdated: false,
+        issues: []
+      };
+    }
+    const issues = Array.isArray(st.contracts)
+      ? st.contracts.filter((c) => c.status !== 'pass')
+      : [];
+    return {
+      status: st.status || 'ok',
+      issueCount: issues.length,
+      failCount: st.failCount || 0,
+      warnCount: st.warnCount || 0,
+      signature: st.signature || 'ok',
+      checkedAtMs: st.checkedAtMs || 0,
+      agyUpdated: Boolean(st.agyUpdated),
+      issues
+    };
+  }
+
+  async runDiagnostics(options = {}) {
+    const refresh = Boolean(options.refresh);
+    const offlineMode = Boolean(options.offlineMode);
+    const simulate = typeof options.simulate === 'string' ? options.simulate.trim().toLowerCase() : '';
+
+    if (
+      !refresh &&
+      !simulate &&
+      this.diagnosticsState &&
+      Date.now() - (this.diagnosticsState.checkedAtMs || 0) < 30000
+    ) {
+      return this.diagnosticsState;
+    }
+    if (this.diagnosticsPromise && !simulate) {
+      return this.diagnosticsPromise;
+    }
+
+    const runPromise = (async () => {
+      const startNs = process.hrtime.bigint();
+      const contracts = [];
+      const addContract = (id, title, status, codeSymbol, detail, fixHint = '') => {
+        contracts.push({ id, title, status, codeSymbol, detail, fixHint });
+      };
+
+      const appDirExists = isDirectory(this.appDataDir);
+      const brainDirExists = isDirectory(this.brainDir);
+      const projectsDirExists = isDirectory(this.projectsDir);
+      if (!appDirExists) {
+        addContract(
+          'app_data_dirs',
+          'On-Disk App Data & Directories',
+          'fail',
+          'server.cjs:resolveAppDataDir',
+          `App data directory not found at ${this.appDataDir}`,
+          'Check APP_CANDIDATES or ANTIGRAVITY_APP_DATA_DIR resolution in server.cjs:resolveAppDataDir().'
+        );
+      } else {
+        addContract(
+          'app_data_dirs',
+          'On-Disk App Data & Directories',
+          'pass',
+          'server.cjs:resolveAppDataDir, resolveProjectsDir',
+          `appDataDir=${this.appDataDir} (brain=${brainDirExists ? 'ok' : 'empty'}, projects=${projectsDirExists ? 'ok' : 'empty'})`
+        );
+      }
+
+      let convDirsChecked = 0;
+      let transcriptsFound = 0;
+      let userStepsCount = 0;
+      let plannerStepsCount = 0;
+      let plannerWithTokensCount = 0;
+      let truncatedWithoutFullCount = 0;
+
+      if (brainDirExists) {
+        try {
+          const dirents = fs.readdirSync(this.brainDir, { withFileTypes: true });
+          const uuidDirs = [];
+          for (const d of dirents) {
+            if (!d.isDirectory() || !UUID_RE.test(d.name)) continue;
+            const sysGenDir = path.join(this.brainDir, d.name, '.system_generated');
+            const trPath = path.join(sysGenDir, 'logs', 'transcript.jsonl');
+            let mtimeMs = 0;
+            try {
+              const st = fs.statSync(trPath, { throwIfNoEntry: false }) || fs.statSync(sysGenDir, { throwIfNoEntry: false });
+              mtimeMs = st ? st.mtimeMs : 0;
+            } catch {}
+            if (mtimeMs > 0) {
+              uuidDirs.push({ id: d.name, trPath, mtimeMs });
+            }
+          }
+          uuidDirs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+          for (const item of uuidDirs.slice(0, 12)) {
+            convDirsChecked += 1;
+            if (!isFile(item.trPath)) continue;
+            transcriptsFound += 1;
+            const raw = fs.readFileSync(item.trPath, 'utf-8');
+            const lines = raw.split(/\r?\n/).filter(Boolean).slice(-80);
+            for (const line of lines) {
+              let obj;
+              try {
+                obj = JSON.parse(line);
+              } catch {
+                continue;
+              }
+              if (obj.type === 'USER_INPUT') userStepsCount += 1;
+              if (obj.type === 'PLANNER_RESPONSE') {
+                plannerStepsCount += 1;
+                if (
+                  typeof obj.input_tokens === 'number' ||
+                  typeof obj.cache_read_tokens === 'number' ||
+                  typeof obj.output_tokens === 'number'
+                ) {
+                  plannerWithTokensCount += 1;
+                }
+              }
+              if (Array.isArray(obj.truncated_fields) && obj.truncated_fields.length > 0) {
+                const fullPath = path.join(path.dirname(item.trPath), 'transcript_full.jsonl');
+                if (!isFile(fullPath)) {
+                  truncatedWithoutFullCount += 1;
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (convDirsChecked >= 3 && transcriptsFound === 0) {
+        addContract(
+          'transcript_schema',
+          'Conversation Transcript JSONL Schema',
+          'fail',
+          'server.cjs:processTranscriptLine, updateTranscriptEntry',
+          `Found ${convDirsChecked} conversation directories with .system_generated, but 0 logs/transcript.jsonl files.`,
+          'Antigravity may have moved or renamed .system_generated/logs/transcript.jsonl. Update transcript path resolution in server.cjs.'
+        );
+      } else if (transcriptsFound > 0 && userStepsCount === 0 && plannerStepsCount === 0) {
+        addContract(
+          'transcript_schema',
+          'Conversation Transcript JSONL Schema',
+          'fail',
+          'server.cjs:processTranscriptLine',
+          `Sampled ${transcriptsFound} transcript.jsonl files, but found 0 USER_INPUT or PLANNER_RESPONSE steps.`,
+          'Step type enum names in transcript.jsonl may have changed. Check processTranscriptLine() in server.cjs.'
+        );
+      } else if (plannerStepsCount >= 3 && plannerWithTokensCount === 0) {
+        addContract(
+          'transcript_schema',
+          'Conversation Transcript JSONL Schema',
+          'warn',
+          'server.cjs:processTranscriptLine',
+          `Found ${plannerStepsCount} PLANNER_RESPONSE steps across ${transcriptsFound} transcripts, but none had input_tokens/cache_read_tokens/output_tokens.`,
+          'Token usage field names in transcript.jsonl may have changed. Update token extraction in server.cjs:processTranscriptLine().'
+        );
+      } else if (truncatedWithoutFullCount > 0) {
+        addContract(
+          'transcript_schema',
+          'Conversation Transcript JSONL Schema',
+          'warn',
+          'server.cjs:resolveFullCheckpointOverview',
+          `Found ${truncatedWithoutFullCount} steps with truncated_fields where transcript_full.jsonl was missing.`,
+          'Check whether transcript_full.jsonl was renamed in .system_generated/logs/.'
+        );
+      } else {
+        addContract(
+          'transcript_schema',
+          'Conversation Transcript JSONL Schema',
+          'pass',
+          'server.cjs:processTranscriptLine, updateTranscriptEntry',
+          `Verified ${transcriptsFound} recent transcript(s) (${userStepsCount} USER_INPUT, ${plannerWithTokensCount}/${plannerStepsCount} PLANNER_RESPONSE with token fields).`
+        );
+      }
+
+      let pbtxtChecked = 0;
+      let pbtxtParsedFields = 0;
+      if (isDirectory(this.annotationsDir)) {
+        try {
+          const files = fs.readdirSync(this.annotationsDir).filter((f) => f.endsWith('.pbtxt')).slice(0, 15);
+          for (const f of files) {
+            const fp = path.join(this.annotationsDir, f);
+            const st = fs.statSync(fp, { throwIfNoEntry: false });
+            if (!st || st.size < 8) continue;
+            pbtxtChecked += 1;
+            const raw = fs.readFileSync(fp, 'utf-8');
+            const parsed = extractAnnotationFromPbtxt(raw);
+            if (parsed.lastViewMs > 0 || parsed.title || parsed.archived || parsed.markedAsUnread) {
+              pbtxtParsedFields += 1;
+            }
+          }
+        } catch {}
+      }
+      if (pbtxtChecked >= 3 && pbtxtParsedFields === 0) {
+        addContract(
+          'annotations_pbtxt',
+          'Conversation Annotations (.pbtxt) Schema',
+          'warn',
+          'server.cjs:extractAnnotationFromPbtxt, resolveConversationAnnotation',
+          `Checked ${pbtxtChecked} non-empty .pbtxt files in annotations/, but 0 matched title/last_user_view_time/archived.`,
+          'Inspect ~/.gemini/antigravity/annotations/*.pbtxt and update regexes in server.cjs:extractAnnotationFromPbtxt().'
+        );
+      } else {
+        addContract(
+          'annotations_pbtxt',
+          'Conversation Annotations (.pbtxt) Schema',
+          'pass',
+          'server.cjs:extractAnnotationFromPbtxt, resolveConversationAnnotation',
+          pbtxtChecked > 0
+            ? `Parsed ${pbtxtParsedFields}/${pbtxtChecked} sampled annotation .pbtxt file(s).`
+            : 'No annotation .pbtxt files present yet.'
+        );
+      }
+
+      let projFilesChecked = 0;
+      let projWithRawResources = 0;
+      let projWithExtractedPaths = 0;
+      if (projectsDirExists) {
+        try {
+          const files = fs.readdirSync(this.projectsDir).filter((f) => f.toLowerCase().endsWith('.json')).slice(0, 20);
+          for (const f of files) {
+            const projId = f.slice(0, -5);
+            if (!UUID_RE.test(projId)) continue;
+            const fp = path.join(this.projectsDir, f);
+            const rawObj = JSON.parse(fs.readFileSync(fp, 'utf-8'));
+            projFilesChecked += 1;
+            const hasRawRes =
+              (Array.isArray(rawObj?.projectResources?.resources) && rawObj.projectResources.resources.length > 0) ||
+              (Array.isArray(rawObj?.environments?.environments) && rawObj.environments.environments.length > 0);
+            if (hasRawRes) {
+              projWithRawResources += 1;
+              const extracted = extractProjectResourcePaths(rawObj);
+              if (extracted.length > 0) {
+                projWithExtractedPaths += 1;
+              }
+            }
+          }
+        } catch {}
+      }
+      if (projWithRawResources > 0 && projWithExtractedPaths === 0) {
+        addContract(
+          'projects_registry',
+          'Projects Registry JSON Schema',
+          'warn',
+          'server.cjs:extractProjectResourcePaths, refreshProjectsRegistry',
+          `Found ${projWithRawResources} project JSON file(s) with resources, but extractProjectResourcePaths() extracted 0 folder URIs.`,
+          'Inspect ~/.gemini/config/projects/*.json and update folderUri extraction in server.cjs:extractProjectResourcePaths().'
+        );
+      } else {
+        addContract(
+          'projects_registry',
+          'Projects Registry JSON Schema',
+          'pass',
+          'server.cjs:extractProjectResourcePaths, refreshProjectsRegistry',
+          `Verified ${projFilesChecked} project JSON file(s) (${projWithExtractedPaths}/${projWithRawResources} resource path sets extracted).`
+        );
+      }
+
+      const lsBinPath = resolveLanguageServerBinary(this.appDataDir);
+      const rpcMethodNames = LSRPC_CONTRACT_SPECS.map((s) => s.method);
+      const allSymbolsToScan = [
+        'LanguageServerService',
+        ...rpcMethodNames,
+        'send-message',
+        'new-conversation'
+      ];
+      const binScan = scanBinarySymbols(lsBinPath, allSymbolsToScan);
+      const nextBinarySig = lsBinPath && binScan.mtimeMs > 0
+        ? `${lsBinPath}|${binScan.mtimeMs}|${binScan.size}`
+        : '';
+      const agyUpdated = Boolean(
+        options.agyUpdated ||
+        (this.lastKnownBinarySig && nextBinarySig && this.lastKnownBinarySig !== nextBinarySig)
+      );
+      if (nextBinarySig && nextBinarySig !== this.lastKnownBinarySig) {
+        this.lastKnownBinarySig = nextBinarySig;
+        try {
+          writeJsonAtomic(this.diagnosticsCachePath, {
+            binarySig: nextBinarySig,
+            updatedAtMs: Date.now()
+          });
+        } catch {}
+      }
+
+      if (!lsBinPath || binScan.error) {
+        addContract(
+          'language_server_binary',
+          'Language Server Binary & RPC Symbols',
+          'warn',
+          'server.cjs:resolveLanguageServerBinary, callLanguageServerRpc',
+          `Could not locate or scan language_server binary (${binScan.error || 'not found'}).`,
+          'Update binary candidate paths in server.cjs:resolveLanguageServerBinary().'
+        );
+      } else {
+        const missingCritical = LSRPC_CONTRACT_SPECS
+          .filter((s) => s.critical && !binScan.found.has(s.method));
+        const missingOptional = LSRPC_CONTRACT_SPECS
+          .filter((s) => !s.critical && !binScan.found.has(s.method));
+        const hasService = binScan.found.has('LanguageServerService');
+
+        if (!hasService || missingCritical.length > 0) {
+          const missingNames = [
+            ...(!hasService ? ['LanguageServerService'] : []),
+            ...missingCritical.map((m) => `${m.method} (${m.caller})`),
+            ...missingOptional.map((m) => `${m.method} (${m.caller})`)
+          ];
+          addContract(
+            'language_server_binary',
+            'Language Server Binary & RPC Symbols',
+            'fail',
+            'server.cjs:callLanguageServerRpc',
+            `Missing critical RPC symbol(s) in language_server binary: ${missingNames.join('; ')}`,
+            'Antigravity renamed or removed LanguageServerService RPC method(s). Run /agy-api-audit and update callLanguageServerRpc callers in server.cjs.'
+          );
+        } else if (missingOptional.length > 0) {
+          addContract(
+            'language_server_binary',
+            'Language Server Binary & RPC Symbols',
+            'warn',
+            'server.cjs:callLanguageServerRpc',
+            `Missing optional RPC symbol(s) in language_server binary (fallbacks active): ${missingOptional.map((m) => `${m.method} [${m.caller}]`).join('; ')}`,
+            'Update renamed RPC method(s) in server.cjs so primary RPC path works without relying on CLI/disk fallback.'
+          );
+        } else {
+          addContract(
+            'language_server_binary',
+            'Language Server Binary & RPC Symbols',
+            'pass',
+            'server.cjs:callLanguageServerRpc',
+            `All ${rpcMethodNames.length} RPC methods + LanguageServerService verified in ${path.basename(lsBinPath)}.`
+          );
+        }
+      }
+
+      const hasLsEnv = Boolean(
+        (process.env.ANTIGRAVITY_LS_ADDRESS || '').trim() &&
+        (process.env.ANTIGRAVITY_CSRF_TOKEN || '').trim()
+      );
+      if (!hasLsEnv) {
+        if (offlineMode) {
+          addContract(
+            'language_server_live_rpc',
+            'Live Language Server RPC Probe',
+            'pass',
+            'server.cjs:callLanguageServerRpc, parseCascadeModelConfigs',
+            'Offline CLI mode (sidecar process not attached to live Language Server env; binary symbols verified).'
+          );
+        } else {
+          addContract(
+            'language_server_live_rpc',
+            'Live Language Server RPC Probe',
+            'warn',
+            'server.cjs:callLanguageServerRpc',
+            'Missing ANTIGRAVITY_LS_ADDRESS or ANTIGRAVITY_CSRF_TOKEN in running sidecar environment.',
+            'Check if Antigravity renamed sidecar Language Server environment variables.'
+          );
+        }
+      } else {
+        const modelRpcRes = await callLanguageServerRpc('GetCascadeModelConfigData', {}, 4000);
+        if (modelRpcRes && modelRpcRes.error) {
+          addContract(
+            'language_server_live_rpc',
+            'Live Language Server RPC Probe',
+            'fail',
+            'server.cjs:getModelsCatalog, callLanguageServerRpc',
+            `Live GetCascadeModelConfigData RPC failed: ${modelRpcRes.error}`,
+            'Inspect LanguageServerService/GetCascadeModelConfigData request/response contract in server.cjs:getModelsCatalog().'
+          );
+        } else {
+          const parsedCatalog = parseCascadeModelConfigs(modelRpcRes);
+          if (parsedCatalog.models.length === 0) {
+            addContract(
+              'language_server_live_rpc',
+              'Live Language Server RPC Probe',
+              'warn',
+              'server.cjs:parseCascadeModelConfigs',
+              'GetCascadeModelConfigData returned HTTP 200, but parseCascadeModelConfigs() extracted 0 models.',
+              'The clientModelConfigs / modelOrAlias response schema in GetCascadeModelConfigData changed. Update server.cjs:parseCascadeModelConfigs().'
+            );
+          } else {
+            let metaDetail = `GetCascadeModelConfigData returned ${parsedCatalog.models.length} models (default=${parsedCatalog.defaultModelEnum || 'auto'})`;
+            const sampleEntry = [...this.convCache.values()].find((e) => !e.isSubagent && UUID_RE.test(e.id));
+            if (sampleEntry) {
+              const metaRes = await callLanguageServerRpc(
+                'GetCascadeTrajectoryGeneratorMetadata',
+                { cascadeId: sampleEntry.id, generatorMetadataOffset: 0, includeMessages: false },
+                3500
+              );
+              if (metaRes && metaRes.error && Number(metaRes.statusCode) === 404) {
+                addContract(
+                  'language_server_live_rpc',
+                  'Live Language Server RPC Probe',
+                  'warn',
+                  'server.cjs:resolveConversationModelAsync',
+                  `GetCascadeTrajectoryGeneratorMetadata returned HTTP 404 (${metaRes.error}).`,
+                  'Update trajectory model metadata RPC in server.cjs:resolveConversationModelAsync().'
+                );
+              } else {
+                metaDetail += '; GetCascadeTrajectoryGeneratorMetadata HTTP 200.';
+                addContract(
+                  'language_server_live_rpc',
+                  'Live Language Server RPC Probe',
+                  'pass',
+                  'server.cjs:getModelsCatalog, resolveConversationModelAsync',
+                  metaDetail
+                );
+              }
+            } else {
+              addContract(
+                'language_server_live_rpc',
+                'Live Language Server RPC Probe',
+                'pass',
+                'server.cjs:getModelsCatalog, parseCascadeModelConfigs',
+                metaDetail
+              );
+            }
+          }
+        }
+      }
+
+      const agentApiCmd = resolveAgentApiCommand(this.appDataDir);
+      const agentApiFileExists = Boolean(agentApiCmd && agentApiCmd.file && isFile(agentApiCmd.file));
+      const hasSendMsgSym = !lsBinPath || binScan.error || binScan.found.has('send-message');
+      const hasNewConvSym = !lsBinPath || binScan.error || binScan.found.has('new-conversation');
+      if (!agentApiFileExists) {
+        addContract(
+          'agentapi_cli',
+          'AgentAPI CLI Binary & Subcommands',
+          'fail',
+          'server.cjs:resolveAgentApiCommand, execAgentApi',
+          `AgentAPI executable not found on disk (resolved: ${agentApiCmd ? agentApiCmd.file : 'none'}).`,
+          'Update binary resolution in server.cjs:resolveAgentApiCommand().'
+        );
+      } else if (!hasSendMsgSym || !hasNewConvSym) {
+        const missingCmds = [
+          ...(!hasSendMsgSym ? ['send-message'] : []),
+          ...(!hasNewConvSym ? ['new-conversation'] : [])
+        ];
+        addContract(
+          'agentapi_cli',
+          'AgentAPI CLI Binary & Subcommands',
+          'fail',
+          'server.cjs:execAgentApi',
+          `AgentAPI binary (${path.basename(agentApiCmd.file)}) is missing subcommand symbol(s): ${missingCmds.join(', ')}`,
+          'Check new CLI subcommands in language_server agentapi and update server.cjs:execAgentApi() callers.'
+        );
+      } else {
+        addContract(
+          'agentapi_cli',
+          'AgentAPI CLI Binary & Subcommands',
+          'pass',
+          'server.cjs:resolveAgentApiCommand, execAgentApi',
+          `Resolved ${agentApiCmd.file} with send-message and new-conversation subcommands.`
+        );
+      }
+
+      const preloadContent = this.loadPreloadJs();
+      const requiredBridgeTokens = [
+        'window.sidecar',
+        'sendMessage',
+        'startConversation',
+        'toggleConversation',
+        'getWorkspaceUris',
+        'onWorkspaceChange'
+      ];
+      const missingBridge = requiredBridgeTokens.filter((t) => !preloadContent.includes(t));
+      const sdkPreloadPath = path.join(this.appDataDir, 'lib', 'node_modules', 'sidecar_sdk', 'preload.js');
+      const usingSdkPreload = isFile(sdkPreloadPath);
+      const warmRefreshMs = Number((this.lastRefreshDurationMs || 0).toFixed(2));
+      if (missingBridge.length > 0) {
+        addContract(
+          'sidecar_bridge_and_perf',
+          'Sidecar Preload Bridge & Performance Budget',
+          'fail',
+          'server.cjs:loadPreloadJs, FALLBACK_PRELOAD_JS',
+          `/preload.js is missing required window.sidecar method(s): ${missingBridge.join(', ')}`,
+          'Update FALLBACK_PRELOAD_JS or loadPreloadJs() in server.cjs.'
+        );
+      } else if (warmRefreshMs > 25 && this.initialBootScanDone) {
+        addContract(
+          'sidecar_bridge_and_perf',
+          'Sidecar Preload Bridge & Performance Budget',
+          'warn',
+          'server.cjs:refreshIndex, handleStatusRequest',
+          `Bridge OK (${usingSdkPreload ? 'sdk preload.js' : 'FALLBACK_PRELOAD_JS'}), but last /api/status refresh took ${warmRefreshMs} ms (target < 5 ms warm).`,
+          'Check incremental parsing and mtimeMs caches in server.cjs:refreshIndex().'
+        );
+      } else {
+        addContract(
+          'sidecar_bridge_and_perf',
+          'Sidecar Preload Bridge & Performance Budget',
+          'pass',
+          'server.cjs:loadPreloadJs, handleStatusRequest',
+          `Bridge OK (${usingSdkPreload ? 'sdk preload.js' : 'FALLBACK_PRELOAD_JS'}), warm /api/status refresh=${warmRefreshMs} ms.`
+        );
+      }
+
+      if (simulate === 'fail' || simulate === 'warn') {
+        contracts.push({
+          id: 'simulated_contract',
+          title: 'Simulated AGY Breaking Change',
+          status: simulate === 'fail' ? 'fail' : 'warn',
+          codeSymbol: 'server.cjs:callLanguageServerRpc',
+          detail: simulate === 'fail'
+            ? 'Simulated FAIL: LanguageServerService RPC signature changed after AGY update.'
+            : 'Simulated WARN: Optional RPC method changed; fallback active.',
+          fixHint: 'Run node setup.cjs --doctor and update the affected contract in server.cjs.'
+        });
+      }
+
+      const failCount = contracts.filter((c) => c.status === 'fail').length;
+      const warnCount = contracts.filter((c) => c.status === 'warn').length;
+      const issueCount = failCount + warnCount;
+      const overallStatus = failCount > 0 ? 'fail' : (warnCount > 0 ? 'warn' : 'ok');
+      const issuesSig = issueCount === 0
+        ? 'ok'
+        : contracts
+            .filter((c) => c.status !== 'pass')
+            .map((c) => `${c.id}:${c.status}:${c.detail}`)
+            .join('|');
+      const durationMs = Number((Number(process.hrtime.bigint() - startNs) / 1e6).toFixed(2));
+      const nowMs = Date.now();
+
+      const report = {
+        status: overallStatus,
+        checkedAtMs: nowMs,
+        checkedAtIso: new Date(nowMs).toISOString(),
+        durationMs,
+        agyUpdated,
+        agyBinary: {
+          path: lsBinPath || '',
+          mtimeMs: binScan.mtimeMs || 0,
+          size: binScan.size || 0
+        },
+        issueCount,
+        failCount,
+        warnCount,
+        signature: issuesSig,
+        contracts
+      };
+
+      if (!simulate) {
+        const prevSig = this.diagnosticsState ? this.diagnosticsState.signature : '';
+        this.diagnosticsState = report;
+        if (prevSig !== issuesSig) {
+          this.diagnosticsRev += 1;
+          this.cachedCardsState = null;
+        }
+      }
+      return report;
+    })();
+
+    if (!simulate) {
+      this.diagnosticsPromise = runPromise;
+      try {
+        return await runPromise;
+      } finally {
+        this.diagnosticsPromise = null;
+      }
+    }
+    return runPromise;
+  }
+
   buildConversationCard(entry, globalObservedCeiling, subagentTokens) {
     const verbatimPrompts = entry.compactCount > 0
       ? Math.min(10, entry.promptCount)
@@ -2835,6 +3641,7 @@ class ContextHealthServer {
       : (hasProjectsRegistry && detectedActiveWorkspaceNorm ? '' : workspaceComparisonKey(detectedActiveWorkspaceNorm));
 
     this.gitCache.checkKnownRepos(isForce);
+    this.checkAgyBinaryChanged(isForce);
 
     const checkNowMs = Date.now();
     if (this.cachedCardsState && Array.isArray(this.cachedCardsState.cards)) {
@@ -2860,6 +3667,7 @@ class ContextHealthServer {
       this.cachedCardsState.projectsRev === this.projectsRev &&
       this.cachedCardsState.gitRev === this.gitCache.revision &&
       this.cachedCardsState.modelsCatalogRev === this.modelsCatalogRev &&
+      this.cachedCardsState.diagnosticsRev === this.diagnosticsRev &&
       this.cachedCardsState.activeWorkspaceKey === activeWorkspaceKey
     ) {
       visibleEntries = this.cachedCardsState.visibleEntries;
@@ -2973,6 +3781,7 @@ class ContextHealthServer {
         globalObservedCeiling,
         projectsRev: this.projectsRev,
         modelsCatalogRev: this.modelsCatalogRev,
+        diagnosticsRev: this.diagnosticsRev,
         activeWorkspaceKey,
         archivedIds: archivedProjects.map((p) => [p.id, p.count]),
         archivedConvIds: archivedConversations.map((c) => [c.id, c.title, c.lastActiveMs]),
@@ -3014,6 +3823,7 @@ class ContextHealthServer {
         projectsRev: this.projectsRev,
         gitRev: this.gitCache.revision,
         modelsCatalogRev: this.modelsCatalogRev,
+        diagnosticsRev: this.diagnosticsRev,
         activeWorkspaceKey,
         visibleEntries,
         cards,
@@ -3035,7 +3845,7 @@ class ContextHealthServer {
     const uiMtimeMs = this.cachedUiMtimeMs;
 
     const clientVersion = parseInt(query.sinceVersion || '0', 10);
-    if (clientVersion > 0 && clientVersion === this.stateVersion && !isForce) {
+    if (clientVersion > 0 && clientVersion === this.stateVersion && !isForce && !query.simulateDiag) {
       return {
         unchanged: true,
         version: this.stateVersion,
@@ -3095,6 +3905,7 @@ class ContextHealthServer {
       activeWorkspaceKey: activeWorkspaceKey || '',
       availableModels: this.cachedModelsCatalog.models,
       defaultModelEnum: this.cachedModelsCatalog.defaultModelEnum || '',
+      diagnostics: this.getDiagnosticsStatusPayload(query),
       workspaces,
       archivedProjects,
       archivedConversations,
@@ -3257,6 +4068,15 @@ class ContextHealthServer {
           }
         } catch {}
       }
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/diagnostics') {
+      const report = await this.runDiagnostics({
+        refresh: query.refresh === '1',
+        simulate: query.simulate || ''
+      });
+      sendJson(res, 200, report);
       return;
     }
 
@@ -3571,6 +4391,12 @@ class ContextHealthServer {
             0o600
           );
         } catch {}
+        const diagTimer = setTimeout(() => {
+          void this.runDiagnostics({ refresh: false });
+        }, 600);
+        if (typeof diagTimer.unref === 'function') {
+          diagTimer.unref();
+        }
         resolve(srv);
       });
     });
@@ -3607,6 +4433,9 @@ if (require.main === module) {
 
 module.exports = {
   ContextHealthServer,
+  LSRPC_CONTRACT_SPECS,
+  resolveLanguageServerBinary,
+  scanBinarySymbols,
   updateTranscriptEntry,
   classifyPollution,
   computeMedian,

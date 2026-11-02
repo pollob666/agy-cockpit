@@ -23,8 +23,9 @@ When a user asks you to **install** or **update** the `context-health` plugin on
 1. **Run the Installer (`node setup.cjs`)**:
    - Execute `node setup.cjs` from the repository root.
    - **Sandbox Note**: `setup.cjs` writes to `~/.gemini/config/plugins/context-health/` (outside the repository workspace) and sends `SIGTERM` to any running `context-health` sidecar process so it restarts cleanly. If running inside the Antigravity terminal sandbox blocks access to `~/.gemini/config`, re-run `node setup.cjs` with `BypassSandbox: true`.
-2. **Verify Installation (`node setup.cjs --check`)**:
+2. **Verify Installation & AGY Contracts (`node setup.cjs --check` / `node setup.cjs --doctor`)**:
    - Run `node setup.cjs --check` and confirm that `"pluginInstalled": true`, `"readmeInstalled": true`, and `"sidecarInstalled": true`.
+   - Run `node setup.cjs --doctor` (or `node setup.cjs --doctor --json`) to verify that the installed plugin matches the repository byte-for-byte and all 8 runtime Antigravity contracts (`app_data_dirs`, `transcript_schema`, `annotations_pbtxt`, `projects_registry`, `language_server_binary`, `language_server_live_rpc`, `agentapi_cli`, and `sidecar_bridge_and_perf`) pass.
 3. **Report Status & Surface the Pill Link**:
    - Include `[Context Health](sidecar://context-health/context-health/ui.html)` in your reply.
    - If the plugin was installed for the **first time** on this machine (the `~/.gemini/config/plugins/context-health` directory did not previously exist), tell the user to **restart or reload Antigravity** once so Antigravity discovers the new plugin directory.

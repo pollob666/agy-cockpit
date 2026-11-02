@@ -63,6 +63,10 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
   <img src="screenshots/smart-handoff.png" alt="Smart Handoff Review & Dynamic Model / Thinking Tier Selector" width="535" />
 </p>
 
+### 6. Antigravity Contract Verifier & Self-Diagnostics (`--doctor`)
+- **Automated AGY Update Protection**: Verifies all 9 internal Antigravity contracts (`plugin_installation_sync`, `app_data_dirs`, `transcript_schema`, `annotations_pbtxt`, `projects_registry`, `language_server_binary`, `language_server_live_rpc`, `agentapi_cli`, and `sidecar_bridge_and_perf`) whenever the sidecar boots or when the `language_server` binary changes on disk after an Antigravity update.
+- **Sticky Bottom Warning Drawer**: Stays completely invisible when all contracts pass (`ok`). If an Antigravity update renames or changes an RPC, CLI flag, or transcript schema field, a sticky floating bar appears at the bottom of the panel with a collapsible contract list, **Re-run Doctor**, and **Copy Fix Prompt** (ready to paste into any coding agent with exact failed contract IDs and `server.cjs` symbols).
+
 ---
 
 ## Installation & Updates (Windows & Linux)
@@ -97,10 +101,11 @@ From the repository root on **Windows** or **Linux**:
 node setup.cjs
 ```
 
-Verify installation status:
+Verify installation status or run the full Antigravity contract verifier (`--doctor`):
 
 ```bash
 node setup.cjs --check
+node setup.cjs --doctor
 ```
 
 ### Updating When New Commits Are Pushed
