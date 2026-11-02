@@ -1,5 +1,7 @@
 # AGY Cockpit (`agy-cockpit`)
 
+[![mezura](screenshots/pill.svg)](https://github.com/subamanis/mezura)
+
 Cross-platform **Antigravity Plugin & Sidecar UI Pane** for **Windows** and **Linux** (pure Node.js, zero external dependencies).
 
 ## Overview
@@ -11,8 +13,26 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 **AGY Cockpit** runs as a lightweight sidecar panel inside Antigravity (`Auxiliary Pane` and `Sidebar`). It monitors live context window usage, compaction tiers, cumulative token consumption (including spawned subagents), 5-hour and weekly model quota limits, and Git drift across all your projects, and provides a **Two-Step Smart Handoff** to seamlessly continue work in a fresh conversation.
 
 <p align="center">
-  <img src="screenshots/hero.png" alt="AGY Cockpit Sidecar Panel" width="620" />
+  <img src="screenshots/hero.png" alt="AGY Cockpit Sidecar Panel" width="380" />
 </p>
+
+## Table of Contents
+- [Overview](#overview)
+- [Features](#features)
+  - [1. Real-Time Context Pollution & Prompt Retention](#1-real-time-context-pollution--prompt-retention)
+  - [2. Total Token Usage & Subagent Breakdown](#2-total-token-usage--subagent-breakdown)
+  - [3. Git / Repository Drift Detection](#3-git--repository-drift-detection)
+  - [4. Workspace Scoping, Live Activity Indicators, Search & Archiving](#4-workspace-scoping-live-activity-indicators-search--archiving)
+  - [5. Two-Step Smart Handoff & Dynamic Model Selector](#5-two-step-smart-handoff--dynamic-model-selector)
+  - [6. Antigravity Contract Verifier & Self-Diagnostics (`--doctor`)](#6-antigravity-contract-verifier--self-diagnostics---doctor)
+- [Installation & Updates (Windows & Linux)](#installation--updates-windows--linux)
+  - [Option A: Ask Your Antigravity AI Agent to Install It (Recommended)](#option-a-ask-your-antigravity-ai-agent-to-install-it-recommended)
+  - [Option B: Manual CLI Installation](#option-b-manual-cli-installation)
+  - [Updating When New Commits Are Pushed](#updating-when-new-commits-are-pushed)
+  - [Uninstalling](#uninstalling)
+  - [Opening the Panel in Antigravity](#opening-the-panel-in-antigravity)
+- [Performance Architecture](#performance-architecture)
+- [License](#license)
 
 ---
 
@@ -42,7 +62,7 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
     4. **Top 5 Heaviest Steps & Most Touched Files**: Ranks the 5 largest individual tool steps (`argBytes + outputBytes`, accounting for `<truncated N bytes>` markers in `O(1)`) and the most read/edited project files in the active window.
 
 <p align="center">
-  <img src="screenshots/context-breakdown.png" alt="AGY Cockpit Context Window Breakdown Modal" width="420" />
+  <img src="screenshots/context-breakdown.png" alt="AGY Cockpit Context Window Breakdown Modal" width="380" />
 </p>
 
 ### 2. Total Token Usage & Subagent Breakdown
@@ -53,7 +73,7 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 - Automatically links spawned subagent conversations (`invoke_subagent` / `sender=<uuid>`) to their parent chat, hiding subagents from the main conversation list while aggregating their token consumption on the parent conversation card.
 - **Interactive Subagent Pill & Inline Breakdown (`+X.Xk · N sub ▾`)**: Clicking the subagent pill expands an inline list showing each spawned subagent's `↳` role/title, token consumption, and live status (`Done`, thinking dots `•••`, or amber `! Waiting permission` / `? Waiting answer`). Clicking any subagent row opens that subagent's conversation directly in Antigravity.
 - **Live Subagent Status Propagation**: If a background subagent is actively thinking (`•••`) or waiting on tool permission (`!`) or a user answer (`?`), its status automatically propagates to the parent conversation card and project filter tab.
-- **5-Hour & Weekly Model Usage Quota Ring**: Displays a live progress ring in the top bar matched to the active conversation's model family (`Anthropic Claude`, `Google Gemini`, `OpenAI`) or the highest usage bottleneck across families. Clicking the quota pill opens the **Model usage limits** modal with per-window usage bars (`5-hour`, `Daily`, `Weekly`, `Monthly`), remaining percentages, and live reset countdowns.
+- **5-Hour & Weekly Model Usage Quota Ring**: Displays a live progress ring in the top bar matched to the active conversation's model family (`Anthropic Claude`, `Google Gemini`, `OpenAI`) or the highest usage bottleneck across families. Clicking the quota pill opens the **Model usage limits** modal with per-window usage bars (`5-hour`, `Daily`, `Weekly`, `Monthly`), remaining percentages, live reset countdowns, and an on-demand **Refresh** button.
 
 ### 3. Git / Repository Drift Detection
 - Detects the Git repository root associated with each conversation and compares the conversation's last activity timestamp against `HEAD` (excluding commits created inside that conversation).
@@ -61,15 +81,15 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 
 ### 4. Workspace Scoping, Live Activity Indicators, Search & Archiving
 - **Pinned Active Chat Card**: Pins the active conversation of the current workspace at the top with a live context meter and token breakdown. Clicking any conversation row in the list switches to that chat in Antigravity and pins it at the top.
-- **Project-Scoped Filter Tabs & Live Thinking / Waiting / Unread Indicators**: Syncs with `~/.gemini/config/projects/` and `window.sidecar.getWorkspaceUris()` (`onWorkspaceChange`) to scope the conversation list to the active project, with tabs to switch across projects or browse `All`. Project tabs and conversation cards display animated thinking dots (`•••`) while an agent is streaming or executing tools, amber `!` (waiting for permission approval) or `?` (waiting for your answer to a question) badges when stalled on user input, and an unread blue dot (`●`) once a background reply completes.
-- **Quick New Conversation (`+ New`)**: Spawn a new conversation directly from the filter bar inside the current/selected project workspace or as a general (`No Project`) chat without leaving the panel.
+- **Project-Scoped Filter Tabs & Live Thinking / Waiting / Unread Indicators**: Syncs with `~/.gemini/config/projects/` and `window.sidecar.getWorkspaceUris()` (`onWorkspaceChange`) to scope the conversation list to the active project, with tabs (`Auto`, `All`, per-project tabs, and `No Project`) to switch across workspaces. Project tabs and conversation cards display animated thinking dots (`•••`) while an agent is streaming or executing tools, amber `!` (waiting for permission approval) or `?` (waiting for your answer to a question) badges when stalled on user input, and an unread blue dot (`●`) once a background reply completes.
+- **Quick New Conversation (`+ New`)**: Spawn a new conversation directly from the filter bar inside the current/selected project workspace or as a general (`No Project`) chat, complete with **Model & Thinking Tier** selection, without leaving the panel.
 - **Turn Previews (`You:` / `AI:`)**: Compact cards in `Other conversations` preview both your latest prompt (`You:`) and the model's latest response (`AI:`) on separate lines.
 - **Conversation Pinning, Custom Renaming, Archiving & Deletion**: Right-click any project tab to start a **`+ New chat in "<Project>"`** or **Archive** the project, or use the bottom-right gear menu (`⚙`) on any conversation card to **Pin to top** / **Unpin from top**, **Rename...** (with **Reset Default**), **Copy ID**, **Archive** (restorable from `Archived (N)`), or permanently **Delete** (`DeleteCascadeTrajectory` with confirmation).
-- **Instant Full-Text Search & Prompt History**: Filters conversations in real time across titles, `USER_INPUT` prompts, and `Task Overview` checkpoint summaries. Expanding `History & Commits` shows missed Git commits, the latest compact overview, and user prompts clamped to 3 lines (`Show more` / `Show less`).
+- **Instant Full-Text Search & Prompt History**: Filters conversations in real time across custom/auto titles, `USER_INPUT` prompts, and `Task Overview` checkpoint summaries. Expanding `History & Commits` shows missed Git commits, the latest compact overview, and user prompts clamped to 3 lines (`Show more` / `Show less`).
 
 ### 5. Two-Step Smart Handoff & Dynamic Model Selector
 - **Step 1 (Optional Focus, AI Generation & Cancellation)**: Click **Smart Handoff** to open an editable focus box where you can optionally specify instructions for the next chat (such as focusing on a specific subtask or writing the handoff in another language), then click **Generate Handoff Prompt**. AGY Cockpit sends an `[AGY Cockpit Smart Handoff]` request to the conversation's agent instructing it to produce a self-contained `<HANDOFF_PROMPT>` without calling any tools. While generating, you can click **Cancel** at any time to abort the in-flight agent invocation (`CancelCascadeInvocation`).
-- **Step 2 (Review, Edit, Select Model & Launch)**: As soon as the agent replies, the extracted `<HANDOFF_PROMPT>` is loaded directly into the plugin's editor so you can review or edit it before clicking **Start New Chat** or **Copy**. Clearing the text box (for example with `Ctrl+A` and `Backspace`) automatically switches the drawer back to Step 1 (**Generate Handoff Prompt**) so you can enter new instructions and regenerate.
+- **Step 2 (Review, Edit, Select Model & Launch)**: As soon as the agent replies, the extracted `<HANDOFF_PROMPT>` is cached for that conversation and loaded directly into the plugin's editor so you can review or edit it before clicking **Start New Chat** or **Copy**. Re-opening **Smart Handoff** on a conversation that already generated a handoff opens directly in Step 2 (with a **Regenerate** button or `Ctrl+A` + `Backspace` to return to Step 1 with new instructions).
 - **Dynamic Model & Thinking Tier Selector**: Discovers all models and thinking tiers available to your account from the local Antigravity Language Server, pre-selects the active conversation's current model and thinking tier by default, and launches the new conversation directly with the chosen model and thinking tier from Step 0 inside the same project and workspace.
 
 <p align="center">
@@ -77,7 +97,7 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 </p>
 
 ### 6. Antigravity Contract Verifier & Self-Diagnostics (`--doctor`)
-- **Automated AGY Update Protection**: `node setup.cjs --doctor` verifies all 9 internal Antigravity contracts (`plugin_installation_sync`, `app_data_dirs`, `transcript_schema`, `annotations_pbtxt`, `projects_registry`, `language_server_binary`, `language_server_live_rpc`, `agentapi_cli`, and `sidecar_bridge_and_perf`), and the running sidecar automatically checks the 8 runtime contracts whenever it boots or when the `language_server` binary changes on disk after an Antigravity update.
+- **Automated AGY Update Protection**: `node setup.cjs --doctor` (and `node setup.cjs --doctor --json` for machine-readable output) verifies all 9 internal Antigravity contracts (`plugin_installation_sync`, `app_data_dirs`, `transcript_schema`, `annotations_pbtxt`, `projects_registry`, `language_server_binary`, `language_server_live_rpc`, `agentapi_cli`, and `sidecar_bridge_and_perf`), automatically probing the live running sidecar when reachable or falling back to offline CLI verification. The running sidecar also checks the 8 runtime contracts whenever it boots or when the `language_server` binary changes on disk after an Antigravity update.
 - **Sticky Bottom Warning Drawer**: Stays completely invisible when all contracts pass (`ok`). If an Antigravity update renames or changes an RPC, CLI flag, or transcript schema field, a sticky floating bar appears at the bottom of the panel with a collapsible contract list, **Re-run Doctor**, and **Copy Fix Prompt** (ready to paste into any coding agent with exact failed contract IDs and `server.cjs` symbols).
 
 ---
@@ -124,11 +144,18 @@ node setup.cjs --doctor
 
 ### Updating When New Commits Are Pushed
 
-Because Antigravity runs the plugin from `~/.gemini/config/plugins/agy-cockpit/`, pulling new commits in the git repository requires re-running `node setup.cjs` to sync the updated files and auto-restart the sidecar server:
+Because Antigravity runs the plugin from `~/.gemini/config/plugins/agy-cockpit/`, pulling new commits in the git repository requires re-running `node setup.cjs` to sync the updated files and auto-restart the sidecar server (no Antigravity restart is required on updates; `server.cjs` restarts automatically and `ui.html` hot-reloads on the next poll):
 
 ```bash
 git pull
 node setup.cjs
+node setup.cjs --doctor
+```
+
+Or ask your Antigravity AI agent:
+
+```text
+Update the AGY Cockpit plugin by running `git pull` and `node setup.cjs` (with BypassSandbox: true), then verify all contracts pass with `node setup.cjs --doctor`.
 ```
 
 ### Uninstalling
@@ -156,31 +183,12 @@ Once installed, **AGY Cockpit** is automatically enabled and available in:
 1. **Incremental Append-Only Transcript Indexing**:
    - [`server.cjs`](./sidecars/agy-cockpit/server.cjs) caches `mtimeMs`, `size`, and `parsedBytes` per conversation in memory and persists `index_cache.json`.
    - On subsequent polls, only newly appended bytes (`stat.size - parsedBytes`) are read from disk, and `"type":"GENERIC"` lines are skipped before `JSON.parse` (`< 1 ms` per status poll on warm cache).
-2. **Git Reflog Tail Parser + `.git/HEAD` Mtime Guard**:
+2. **Directory & File Mtime Gating**:
+   - Guards `annotations/*.pbtxt` and `~/.gemini/config/projects/*.json` behind directory and per-file `mtimeMs` checks so unchanged cold conversations and project manifests incur zero redundant disk I/O on `/api/status` polls.
+3. **Git Reflog Tail Parser + `.git/HEAD` Mtime Guard**:
    - [`server.cjs`](./sidecars/agy-cockpit/server.cjs) inspects `.git/HEAD` and `.git/logs/HEAD` `mtimeMs` with a 1.5s TTL before reading Git state.
-
----
-
-## Repository Structure
-
-```text
-.
-├── plugin.json                       # Antigravity plugin manifest (auto-enables sidecar)
-├── sidecars/
-│   └── agy-cockpit/
-│       ├── sidecar.json              # Antigravity sidecar manifest (AUX_PANE + SIDEBAR)
-│       ├── server.cjs                # HTTP + incremental transcript, token & git indexing server
-│       └── ui.html                   # Auxiliary pane & sidebar UI
-├── screenshots/
-│   ├── hero.png                      # Full AGY Cockpit panel preview
-│   ├── compaction-tiers.gif          # Animated progression across compaction tiers
-│   ├── context-breakdown.png         # On-demand Context Window Breakdown modal
-│   └── smart-handoff.png             # Smart Handoff editor with Model & Thinking Tier selector
-├── setup.cjs                         # Cross-platform installer & updater (Windows & Linux)
-├── AGENTS.md                         # Instructions & installation runbook for AI coding agents
-├── LICENSE                           # MIT License
-└── README.md                         # Human & AI agent documentation
-```
+4. **Persistent Binary Symbol Cache & Tail-Only Diagnostics**:
+   - `diagnostics_cache.json` persists verified `language_server` RPC and CLI symbols keyed by binary `mtimeMs` and size, and `readFileTailLines()` reads only the last 512 KB of sampled transcripts during `--doctor` checks.
 
 ---
 
