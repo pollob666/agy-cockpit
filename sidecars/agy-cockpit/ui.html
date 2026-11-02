@@ -1779,7 +1779,7 @@
       ).trim().toLowerCase();
 
       try {
-        const cachedTheme = sessionStorage.getItem('__ch_theme_vars__');
+        const cachedTheme = sessionStorage.getItem('__agy_cockpit_theme_vars__');
         if (cachedTheme) {
           const parsedVars = JSON.parse(cachedTheme);
           for (const [k, v] of Object.entries(parsedVars)) {
@@ -1790,7 +1790,7 @@
       window.addEventListener('message', (ev) => {
         if (ev.data && ev.data.type === 'theme-change' && ev.data.payload && ev.data.payload.cssVariables) {
           try {
-            sessionStorage.setItem('__ch_theme_vars__', JSON.stringify(ev.data.payload.cssVariables));
+            sessionStorage.setItem('__agy_cockpit_theme_vars__', JSON.stringify(ev.data.payload.cssVariables));
           } catch {}
         }
       });
@@ -1798,7 +1798,7 @@
       const urlSimulateDiag = (new URLSearchParams(window.location.search).get('simulateDiag') || '').trim();
       let initialDismissedDiagSig = '';
       try {
-        initialDismissedDiagSig = sessionStorage.getItem('__ch_dismissed_diag_sig__') || '';
+        initialDismissedDiagSig = sessionStorage.getItem('__agy_cockpit_dismissed_diag_sig__') || '';
       } catch {}
 
       const state = {
@@ -4063,10 +4063,6 @@
               if (!state.pendingSmartHandoff || state.pendingSmartHandoff.convId !== convId) {
                 return;
               }
-              const latestCard = state.conversations.find((c) => c.id === convId);
-              if (latestCard && latestCard.isThinking) {
-                return;
-              }
               cancelPendingSmartHandoff(false);
               console.warn('[AgyCockpit] agent sendMessage failed:', agentErr);
               showToast('Agent unavailable: ' + agentErr.message);
@@ -4723,7 +4719,7 @@
             state.dismissedDiagSig = sig;
             state.diagExpanded = false;
             try {
-              sessionStorage.setItem('__ch_dismissed_diag_sig__', sig);
+              sessionStorage.setItem('__agy_cockpit_dismissed_diag_sig__', sig);
             } catch {}
             renderDiagnosticsSticky();
           }
@@ -5078,7 +5074,7 @@
         showToast('Refreshed');
       });
 
-      const ACTIVE_CONV_STORAGE_KEY = '__ch_active_conv_id__';
+      const ACTIVE_CONV_STORAGE_KEY = '__agy_cockpit_active_conv_id__';
 
       function isIframeCollapsed() {
         return Boolean(window.innerWidth === 0 && window.innerHeight === 0);

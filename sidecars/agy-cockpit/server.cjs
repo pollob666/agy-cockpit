@@ -333,6 +333,13 @@ function cleanUserPrompt(rawContent) {
   return text.replace(/\r\n/g, '\n').trim();
 }
 
+function isSmartHandoffRequestText(rawContent) {
+  if (!rawContent || typeof rawContent !== 'string') return false;
+  const trimmed = rawContent.trimStart();
+  if (trimmed.startsWith('[AGY Cockpit Smart Handoff]')) return true;
+  return trimmed.includes('<USER_REQUEST>') && cleanUserPrompt(trimmed).startsWith('[AGY Cockpit Smart Handoff]');
+}
+
 function cleanModelPreview(rawContent) {
   if (!rawContent || typeof rawContent !== 'string') return '';
   let text = rawContent
@@ -689,11 +696,7 @@ function buildContextBreakdownForTranscript(convId, transcriptPath, entry, obser
 
     if (isActive && type === 'USER_INPUT') {
       const cleaned = cleanUserPrompt(content);
-      if (
-        cleaned &&
-        !cleaned.startsWith('[AGY Cockpit Smart Handoff]') &&
-        !cleaned.startsWith('[Context Health Smart Handoff]')
-      ) {
+      if (cleaned && !isSmartHandoffRequestText(cleaned)) {
         activePromptsCount += 1;
         userMessagesBytes += estimateRawUtf8Bytes(cleaned);
       }
@@ -953,7 +956,6 @@ function createEmptyEntry(convId) {
     lastPlannerStepTok: null,
     lastHandoffStepIndex: -1,
     lastHandoffCompletedStepIndex: -1,
-    handoffUpdatedInPass: false,
     lastActiveIso: '',
     lastActiveMs: 0,
     lastUserInputMs: 0,
@@ -1202,7 +1204,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
   if (type === 'USER_INPUT') {
     const clean = cleanUserPrompt(content);
     if (clean) {
-      if (clean.startsWith('[AGY Cockpit Smart Handoff]') || clean.startsWith('[Context Health Smart Handoff]')) {
+      if (isSmartHandoffRequestText(clean)) {
         if (stepIdx >= 0) entry.lastParsedStepIndex = stepIdx;
         entry.awaitingHandoffResponse = true;
         return false;
@@ -1253,6 +1255,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.lastActiveMs = createdMs;
     }
     const hasTools = Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0;
+    const prevHadTools = isRepeatStep && Boolean(entry.lastStepHasToolCalls);
     const stepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
     if (entry.awaitingHandoffResponse && stepIdx >= 0) {
       entry.lastHandoffStepIndex = stepIdx;
@@ -1307,22 +1310,26 @@ function processTranscriptLine(entry, line, isFirstLine) {
         (Array.isArray(obj.truncated_fields) && obj.truncated_fields.includes('content')) ||
         content.includes('\n<truncated ');
       const handoffMatch = /<HANDOFF_PROMPT>\s*([\s\S]*?)\s*<\/HANDOFF_PROMPT>/i.exec(trimmedContent);
-      if (handoffMatch && handoffMatch[1].trim() && !isTruncatedContent) {
+      const extractedHandoff = !isTruncatedContent
+        ? (handoffMatch && handoffMatch[1].trim()
+            ? handoffMatch[1].trim()
+            : (wasAwaitingHandoff && stepStatus !== 'RUNNING' && !/<HANDOFF_PROMPT>/i.test(trimmedContent) && !hasTools
+                ? trimmedContent
+                : ''))
+        : '';
+      if (extractedHandoff) {
         isHandoffStep = true;
-        const nextHandoff = handoffMatch[1].trim();
-        if (nextHandoff !== entry.latestHandoffPrompt || entry.lastHandoffCompletedStepIndex !== stepIdx) {
-          entry.latestHandoffPrompt = nextHandoff;
+        if (extractedHandoff !== entry.latestHandoffPrompt || entry.lastHandoffCompletedStepIndex !== stepIdx) {
+          entry.latestHandoffPrompt = extractedHandoff;
           entry.latestHandoffMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
           entry.lastHandoffCompletedStepIndex = stepIdx;
-          entry.handoffUpdatedInPass = true;
         }
         entry.awaitingHandoffResponse = false;
         entry.needsFullHandoffRead = false;
         entry.handoffTargetStepIndex = -1;
       } else if (
         isTruncatedContent &&
-        (/<HANDOFF_PROMPT>/i.test(trimmedContent) ||
-          (wasAwaitingHandoff && (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)))
+        (/<HANDOFF_PROMPT>/i.test(trimmedContent) || (wasAwaitingHandoff && !hasTools))
       ) {
         isHandoffStep = true;
         if (entry.lastHandoffCompletedStepIndex !== stepIdx || entry.needsFullHandoffRead) {
@@ -1331,22 +1338,6 @@ function processTranscriptLine(entry, line, isFirstLine) {
           entry.handoffPendingMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
         }
         entry.awaitingHandoffResponse = false;
-      } else if (
-        wasAwaitingHandoff &&
-        stepStatus !== 'RUNNING' &&
-        !/<HANDOFF_PROMPT>/i.test(trimmedContent) &&
-        (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)
-      ) {
-        isHandoffStep = true;
-        if (trimmedContent !== entry.latestHandoffPrompt || entry.lastHandoffCompletedStepIndex !== stepIdx) {
-          entry.latestHandoffPrompt = trimmedContent;
-          entry.latestHandoffMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
-          entry.lastHandoffCompletedStepIndex = stepIdx;
-          entry.handoffUpdatedInPass = true;
-        }
-        entry.awaitingHandoffResponse = false;
-        entry.needsFullHandoffRead = false;
-        entry.handoffTargetStepIndex = -1;
       } else if (!wasAwaitingHandoff) {
         const preview = cleanModelPreview(trimmedContent);
         if (preview) {
@@ -1379,7 +1370,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
           entry.pendingSubagentRoles.push(typeof role === 'string' ? cleanTranscriptArgString(role).trim() : '');
         }
       }
-      if (!isRepeatStep) {
+      if (!isRepeatStep || !prevHadTools) {
         const rawPaths = extractPathsFromToolCalls(obj.tool_calls);
         for (const rp of rawPaths) {
           const root = findGitOrWorkspaceRoot(rp);
@@ -1400,15 +1391,14 @@ function processTranscriptLine(entry, line, isFirstLine) {
   }
 
   if (type === 'CHECKPOINT') {
-    if (!isRepeatStep) {
-      if (stepIdx >= 0) entry.lastParsedStepIndex = stepIdx;
-      entry.compactCount += 1;
-      entry.promptsSinceLastCompact = 0;
-      if (entry.lastPlannerTokens > 0) {
-        entry.compactTriggerTokens.push(entry.lastPlannerTokens);
-        if (entry.compactTriggerTokens.length > 25) {
-          entry.compactTriggerTokens.shift();
-        }
+    if (isRepeatStep) return false;
+    if (stepIdx >= 0) entry.lastParsedStepIndex = stepIdx;
+    entry.compactCount += 1;
+    entry.promptsSinceLastCompact = 0;
+    if (entry.lastPlannerTokens > 0) {
+      entry.compactTriggerTokens.push(entry.lastPlannerTokens);
+      if (entry.compactTriggerTokens.length > 25) {
+        entry.compactTriggerTokens.shift();
       }
     }
     if (createdAt) {
@@ -1687,7 +1677,6 @@ function resolveFullHandoffPrompt(entry, transcriptPath) {
   if (found) {
     const targetStep = typeof entry.handoffTargetStepIndex === 'number' ? entry.handoffTargetStepIndex : -1;
     entry.lastHandoffCompletedStepIndex = targetStep;
-    entry.handoffUpdatedInPass = true;
     entry.latestHandoffMs = Math.max(entry.handoffPendingMs || Date.now(), (entry.latestHandoffMs || 0) + 1, Date.now());
     entry.needsFullHandoffRead = false;
     entry.handoffTargetStepIndex = -1;
@@ -1826,9 +1815,9 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
   const text = completeBuf.toString('utf-8');
   const lines = text.split('\n');
 
-  entry.handoffUpdatedInPass = false;
+  const prevHandoffMs = entry.latestHandoffMs || 0;
   let isFirstLine = startOffset === 0;
-  let corpusDirty = startOffset === 0;
+  let corpusDirty = !canIncremental;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
@@ -1848,10 +1837,9 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
     resolveFullHandoffPrompt(entry, transcriptPath);
   }
 
-  if (entry.handoffUpdatedInPass && startOffset > 0) {
+  if (canIncremental && (entry.latestHandoffMs || 0) > prevHandoffMs) {
     entry.latestHandoffMs = Math.max(entry.latestHandoffMs || 0, Math.floor(stat.mtimeMs || 0), Date.now());
   }
-  entry.handoffUpdatedInPass = false;
 
   let endPos = completeBuf.length;
   while (endPos > 0 && (completeBuf[endPos - 1] === 0x0a || completeBuf[endPos - 1] === 0x0d)) {
@@ -3017,7 +3005,7 @@ class AgyCockpitServer {
     if (isFile(this.indexCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.indexCachePath, 'utf-8'));
-        if (raw && raw.version === 16 && Array.isArray(raw.entries)) {
+        if (raw && raw.version === 17 && Array.isArray(raw.entries)) {
           for (const item of raw.entries) {
             if (item && typeof item.id === 'string') {
               item.lastLineOffset = typeof item.lastLineOffset === 'number' ? item.lastLineOffset : 0;
@@ -3025,7 +3013,7 @@ class AgyCockpitServer {
               item.lastPlannerStepTok = item.lastPlannerStepTok && typeof item.lastPlannerStepTok === 'object' ? item.lastPlannerStepTok : null;
               item.lastHandoffStepIndex = typeof item.lastHandoffStepIndex === 'number' ? item.lastHandoffStepIndex : -1;
               item.lastHandoffCompletedStepIndex = typeof item.lastHandoffCompletedStepIndex === 'number' ? item.lastHandoffCompletedStepIndex : -1;
-              item.handoffUpdatedInPass = false;
+              delete item.handoffUpdatedInPass;
               item.lastUserInputMs = item.lastUserInputMs || 0;
               item.lastSeenMs = item.lastSeenMs || 0;
               item.markedAsUnread = Boolean(item.markedAsUnread);
@@ -3062,7 +3050,7 @@ class AgyCockpitServer {
     this.indexCacheDirty = false;
     try {
       const entries = [...this.convCache.values()];
-      writeJsonAtomic(this.indexCachePath, { version: 16, savedAt: Date.now(), entries });
+      writeJsonAtomic(this.indexCachePath, { version: 17, savedAt: Date.now(), entries });
     } catch {}
   }
 
@@ -3417,6 +3405,34 @@ class AgyCockpitServer {
     };
   }
 
+  resolveEntryDisplayMeta(entry) {
+    const rawWsPath = (entry && entry.workspacePath) || '';
+    const matchedProj = this.matchProjectForWorkspace(rawWsPath);
+    const effectiveWsPath = matchedProj
+      ? (matchedProj.primaryPath || rawWsPath)
+      : rawWsPath;
+    const effectiveWsKey = matchedProj
+      ? (matchedProj.primaryKey || workspaceComparisonKey(effectiveWsPath))
+      : workspaceComparisonKey(effectiveWsPath);
+    const effectiveWsName = matchedProj
+      ? matchedProj.name
+      : getWorkspaceLabel(effectiveWsPath);
+    const customTitle = (entry && this.customTitles.get(entry.id)) || '';
+    const defaultTitle = entry
+      ? (entry.title || entry.firstPrompt || entry.lastPrompt || ('Conversation ' + entry.id.slice(0, 8)))
+      : '';
+    return {
+      matchedProj,
+      projectId: matchedProj ? matchedProj.id : '',
+      workspacePath: effectiveWsPath,
+      workspaceKey: effectiveWsKey,
+      workspaceName: effectiveWsName,
+      customTitle,
+      defaultTitle,
+      title: customTitle || (entry && entry.title) || ''
+    };
+  }
+
   setConversationCustomTitle(convId, title) {
     const cleanId = (convId || '').trim().toLowerCase();
     if (!UUID_RE.test(cleanId)) {
@@ -3431,9 +3447,7 @@ class AgyCockpitServer {
     this.saveArchivedData();
     this.markTranscriptDirty({ resetSummary: false, saveIndex: false, bumpStateVersion: true });
     const entry = this.convCache.get(cleanId);
-    const defaultTitle = entry
-      ? (entry.title || entry.firstPrompt || entry.lastPrompt || ('Conversation ' + cleanId.slice(0, 8)))
-      : '';
+    const meta = this.resolveEntryDisplayMeta(entry);
     return {
       status: 200,
       body: {
@@ -3441,8 +3455,8 @@ class AgyCockpitServer {
         id: cleanId,
         conversationId: cleanId,
         customTitle: cleanTitle,
-        title: cleanTitle || (entry && entry.title) || '',
-        defaultTitle
+        title: meta.title,
+        defaultTitle: meta.defaultTitle
       }
     };
   }
@@ -4864,16 +4878,7 @@ class AgyCockpitServer {
       : null;
 
     const drift = this.gitCache.computeDriftForConversation(entry);
-    const matchedProj = this.matchProjectForWorkspace(entry.workspacePath || '');
-    const effectiveWsPath = matchedProj
-      ? (matchedProj.primaryPath || entry.workspacePath || '')
-      : (entry.workspacePath || '');
-    const effectiveWsKey = matchedProj
-      ? (matchedProj.primaryKey || workspaceComparisonKey(effectiveWsPath))
-      : workspaceComparisonKey(effectiveWsPath);
-    const effectiveWsName = matchedProj
-      ? matchedProj.name
-      : getWorkspaceLabel(effectiveWsPath);
+    const meta = this.resolveEntryDisplayMeta(entry);
 
     const { waitState, waitToolName, isThinking, subagents } = this.resolveSubagentsState(entry);
 
@@ -4891,22 +4896,16 @@ class AgyCockpitServer {
 
     const pinnedAtMs = this.pinnedConversations.get(entry.id) || 0;
     const pinned = pinnedAtMs > 0;
-    const customTitle = this.customTitles.get(entry.id) || '';
-    const defaultTitle =
-      entry.title ||
-      entry.firstPrompt ||
-      entry.lastPrompt ||
-      ('Conversation ' + entry.id.slice(0, 8));
 
     return {
       id: entry.id,
       isSubagent: !!entry.isSubagent,
       subagentTokens: subagentTokens ? (subagentTokens.get(entry.id) || 0) : 0,
       subagents,
-      projectId: matchedProj ? matchedProj.id : '',
-      workspacePath: effectiveWsPath,
-      workspaceKey: effectiveWsKey,
-      workspaceName: effectiveWsName,
+      projectId: meta.projectId,
+      workspacePath: meta.workspacePath,
+      workspaceKey: meta.workspaceKey,
+      workspaceName: meta.workspaceName,
       lastActiveIso: entry.lastActiveIso || '',
       lastActiveMs: entry.lastActiveMs || 0,
       lastUserInputMs: entry.lastUserInputMs || 0,
@@ -4931,9 +4930,9 @@ class AgyCockpitServer {
       contextRatio,
       pinned,
       pinnedAtMs,
-      customTitle,
-      defaultTitle,
-      title: customTitle || entry.title || '',
+      customTitle: meta.customTitle,
+      defaultTitle: meta.defaultTitle,
+      title: meta.title,
       firstPrompt: entry.firstPrompt || '',
       lastPrompt: entry.lastPrompt || '',
       lastModelResponse: entry.lastModelResponse || '',
@@ -5046,27 +5045,15 @@ class AgyCockpitServer {
       visibleEntries = sortedEntries.filter((e) => {
         if (e.isSubagent) return false;
         if (e.archived) {
-          const matchedProj = this.matchProjectForWorkspace(e.workspacePath || '');
-          const effectiveWsPath = matchedProj
-            ? (matchedProj.primaryPath || e.workspacePath || '')
-            : (e.workspacePath || '');
-          const effectiveWsName = matchedProj
-            ? matchedProj.name
-            : getWorkspaceLabel(effectiveWsPath);
-          const archCustomTitle = this.customTitles.get(e.id) || '';
-          const archDefaultTitle =
-            e.title ||
-            e.firstPrompt ||
-            e.lastPrompt ||
-            ('Conversation ' + e.id.slice(0, 8));
+          const meta = this.resolveEntryDisplayMeta(e);
           archivedConversations.push({
             id: e.id,
-            title: archCustomTitle || e.title || '',
-            customTitle: archCustomTitle,
-            defaultTitle: archDefaultTitle,
+            title: meta.title,
+            customTitle: meta.customTitle,
+            defaultTitle: meta.defaultTitle,
             firstPrompt: e.firstPrompt || '',
             lastPrompt: e.lastPrompt || '',
-            workspaceName: effectiveWsName,
+            workspaceName: meta.workspaceName,
             lastActiveMs: e.lastActiveMs || 0
           });
           hiddenMainItems.push([e.id, e.lastActiveMs, e.latestHandoffMs, e.currentTokens, e.totalTokens, e.promptCount, e.compactCount]);
@@ -5656,8 +5643,10 @@ class AgyCockpitServer {
           preSendMtimeMs = st.mtimeMs || 0;
         }
       } catch {}
+      const isHandoffMessage = isSmartHandoffRequestText(message);
       const preTarget = this.convCache.get(cleanConvId);
-      if (preTarget && isSmartHandoffRequestText(message)) {
+      const prevAwaitingHandoff = Boolean(preTarget && preTarget.awaitingHandoffResponse);
+      if (preTarget && isHandoffMessage && !prevAwaitingHandoff) {
         preTarget.awaitingHandoffResponse = true;
         this.markTranscriptDirty({ resetSummary: true, saveIndex: false });
       }
@@ -5667,7 +5656,7 @@ class AgyCockpitServer {
           const nowMs = Date.now();
           target.lastActiveIso = new Date(nowMs).toISOString();
           target.lastActiveMs = Math.max(target.lastActiveMs || 0, nowMs);
-          if (isSmartHandoffRequestText(message)) {
+          if (isHandoffMessage) {
             target.awaitingHandoffResponse = true;
           }
           this.markTranscriptDirty({ resetSummary: true, saveIndex: false });
@@ -5681,7 +5670,7 @@ class AgyCockpitServer {
           metadata: {},
           clientType: 'CHAT_CLIENT_REQUEST_STREAM_CLIENT_TYPE_IDE'
         },
-        45000
+        15000
       );
       if (sendRpc && !sendRpc.error) {
         markSentSuccess();
@@ -5711,6 +5700,11 @@ class AgyCockpitServer {
       const nativeWsPath = wsPath && process.platform === 'win32' ? wsPath.replace(/\//g, '\\') : wsPath;
       const out = await execAgentApi(['send-message', convId, message], effectiveProjectId, this.appDataDir, nativeWsPath);
       if (out && out.error) {
+        const target = this.convCache.get(cleanConvId);
+        if (target && isHandoffMessage && !prevAwaitingHandoff) {
+          target.awaitingHandoffResponse = false;
+          this.markTranscriptDirty({ resetSummary: true, saveIndex: false });
+        }
         sendJson(res, 502, out);
         return;
       }
@@ -5859,6 +5853,7 @@ class AgyCockpitServer {
         '';
       const cascadeId = rawCascadeId.trim().toLowerCase();
       if (cascadeId && UUID_RE.test(cascadeId)) {
+        seedNewConversation(cascadeId);
         const sendPayload = {
           cascadeId,
           items: [{ text: message }],
@@ -5874,11 +5869,24 @@ class AgyCockpitServer {
           };
         }
         const sendRpc = await callLanguageServerRpc('SendUserCascadeMessage', sendPayload, 12000);
-        if (sendRpc.error) {
-          sendJson(res, 502, { error: sendRpc.error, cascadeId });
-          return;
+        if (sendRpc && sendRpc.error) {
+          const newTranscriptPath = path.join(this.brainDir, cascadeId, '.system_generated', 'logs', 'transcript.jsonl');
+          let acceptedOnDisk = false;
+          try {
+            const st = fs.statSync(newTranscriptPath, { throwIfNoEntry: false });
+            acceptedOnDisk = Boolean(st && st.isFile() && st.size > 0);
+          } catch {}
+          if (!acceptedOnDisk) {
+            this.convCache.delete(cascadeId);
+            if (this.metadataWorkspaceCache.delete(cascadeId)) {
+              this.saveMetadataCache();
+            }
+            this.markTranscriptDirty();
+            sendJson(res, 502, { error: sendRpc.error, cascadeId });
+            return;
+          }
+          this.refreshSingleEntry(cascadeId);
         }
-        seedNewConversation(cascadeId);
         this.lastFullScanMs = 0;
         this.lastBrainDirMtimeMs = 0;
         sendJson(res, 200, {
@@ -5986,7 +5994,6 @@ if (require.main === module) {
 
 module.exports = {
   AgyCockpitServer,
-  ContextHealthServer: AgyCockpitServer,
   LSRPC_CONTRACT_SPECS,
   resolveLanguageServerBinary,
   scanBinarySymbols,

@@ -16,11 +16,8 @@ const PLUGIN_SRC_FILE = path.join(REPO_ROOT, 'plugin.json');
 const README_SRC_FILE = path.join(REPO_ROOT, 'README.md');
 const SIDECAR_SRC_DIR = path.join(REPO_ROOT, 'sidecars', 'agy-cockpit');
 
-const LEGACY_SIDECAR_DIR = path.join(GEMINI_CONFIG_DIR, 'sidecars', 'agy-cockpit');
 const PLUGIN_DEST_DIR = path.join(GEMINI_CONFIG_DIR, 'plugins', 'agy-cockpit');
 const SIDECAR_DEST_DIR = path.join(PLUGIN_DEST_DIR, 'sidecars', 'agy-cockpit');
-const LEGACY_HOOK_DEST_FILE = path.join(SIDECAR_DEST_DIR, 'agy-cockpit-check.cjs');
-const HOOKS_JSON_FILE = path.join(GEMINI_CONFIG_DIR, 'hooks.json');
 
 function resolveNodeExecutable() {
   const execPath = process.execPath;
@@ -37,18 +34,6 @@ function resolveNodeExecutable() {
     } catch {}
   }
   return 'node';
-}
-
-function readExistingHooksJson() {
-  if (!fs.existsSync(HOOKS_JSON_FILE)) return {};
-  try {
-    const raw = fs.readFileSync(HOOKS_JSON_FILE, 'utf-8').trim();
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
 }
 
 function findServerInfoCandidates() {
@@ -133,27 +118,8 @@ function restartRunningSidecarServer() {
   }
 }
 
-function removeLegacyHookRegistration() {
-  if (fs.existsSync(LEGACY_HOOK_DEST_FILE)) {
-    try {
-      fs.rmSync(LEGACY_HOOK_DEST_FILE, { force: true });
-    } catch {}
-  }
-  if (fs.existsSync(HOOKS_JSON_FILE)) {
-    const hooksConfig = readExistingHooksJson();
-    if ('agy-cockpit' in hooksConfig) {
-      delete hooksConfig['agy-cockpit'];
-      fs.writeFileSync(HOOKS_JSON_FILE, JSON.stringify(hooksConfig, null, 2) + '\n', 'utf-8');
-    }
-  }
-}
-
 function installAll() {
   const nodeBin = resolveNodeExecutable();
-
-  if (fs.existsSync(LEGACY_SIDECAR_DIR)) {
-    fs.rmSync(LEGACY_SIDECAR_DIR, { recursive: true, force: true });
-  }
 
   fs.mkdirSync(SIDECAR_DEST_DIR, { recursive: true });
   fs.copyFileSync(PLUGIN_SRC_FILE, path.join(PLUGIN_DEST_DIR, 'plugin.json'));
@@ -177,7 +143,6 @@ function installAll() {
     fs.copyFileSync(src, dest);
   }
 
-  removeLegacyHookRegistration();
   restartRunningSidecarServer();
 
   console.log('[agy-cockpit] Installed successfully:');
@@ -190,10 +155,6 @@ function installAll() {
 
 function uninstallAll() {
   restartRunningSidecarServer();
-  removeLegacyHookRegistration();
-  if (fs.existsSync(LEGACY_SIDECAR_DIR)) {
-    fs.rmSync(LEGACY_SIDECAR_DIR, { recursive: true, force: true });
-  }
   if (fs.existsSync(PLUGIN_DEST_DIR)) {
     fs.rmSync(PLUGIN_DEST_DIR, { recursive: true, force: true });
   }
