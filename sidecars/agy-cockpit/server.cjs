@@ -996,13 +996,16 @@ function createEmptyEntry(convId) {
     lastLineOffset: 0,
     lastParsedStepIndex: -1,
     lastPlannerStepTok: null,
+    lastHandoffRequestStepIndex: -1,
     lastHandoffStepIndex: -1,
     lastHandoffCompletedStepIndex: -1,
+    handoffRpcPendingMs: 0,
     lastActiveIso: '',
     lastActiveMs: 0,
     lastUserInputMs: 0,
     lastViewMs: 0,
     lastSeenMs: 0,
+    manualUnreadAtMs: 0,
     archived: false,
     markedAsUnread: false,
     isSubagent: false,
@@ -1021,8 +1024,10 @@ function createEmptyEntry(convId) {
     totalOutputTokens: 0,
     totalTokens: 0,
     compactTriggerTokens: [],
+    projectId: '',
     workspacePath: '',
     workspaceCounts: {},
+    lsSummary: '',
     title: '',
     firstPrompt: '',
     lastPrompt: '',
@@ -1031,6 +1036,7 @@ function createEmptyEntry(convId) {
     lastStepType: '',
     lastStepStatus: '',
     lastStepHasToolCalls: false,
+    lastStepIsCompletedReply: false,
     lastStepWaitKind: '',
     lastStepWaitDelayMs: 0,
     lastStepWaitToolName: '',
@@ -1129,6 +1135,7 @@ function getEntryWaitState(entry, nowMs = Date.now()) {
 function isEntryThinking(entry, nowMs = Date.now()) {
   if (!entry) return false;
   if (getEntryWaitState(entry, nowMs)) return false;
+  if (entry.handoffRpcPendingMs && nowMs - entry.handoffRpcPendingMs < 30000) return true;
   const lastAct = Math.max(entry.mtimeMs || 0, entry.lastStepMs || 0, entry.lastActiveMs || 0);
   if (!lastAct || nowMs - lastAct > 180000) return false;
   if (entry.awaitingHandoffResponse) return true;
@@ -1174,6 +1181,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
       ? 'RUNNING'
       : (line.includes('"status":"ERROR"') ? 'ERROR' : 'DONE');
     entry.lastStepHasToolCalls = false;
+    entry.lastStepIsCompletedReply = false;
     entry.lastStepWaitKind = '';
     entry.lastStepWaitDelayMs = 0;
     entry.lastStepWaitToolName = '';
@@ -1198,6 +1206,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
     entry.lastStepType = 'ERROR_MESSAGE';
     entry.lastStepStatus = 'ERROR';
     entry.lastStepHasToolCalls = false;
+    entry.lastStepIsCompletedReply = false;
     entry.lastStepWaitKind = '';
     entry.lastStepWaitDelayMs = 0;
     entry.lastStepWaitToolName = '';
@@ -1247,7 +1256,24 @@ function processTranscriptLine(entry, line, isFirstLine) {
     const clean = cleanUserPrompt(content);
     if (clean) {
       if (isSmartHandoffRequestText(clean)) {
-        if (stepIdx >= 0) entry.lastParsedStepIndex = stepIdx;
+        if (stepIdx >= 0) {
+          entry.lastParsedStepIndex = stepIdx;
+          entry.lastHandoffRequestStepIndex = stepIdx;
+        } else if (typeof entry.lastParsedStepIndex === 'number' && entry.lastParsedStepIndex >= 0) {
+          entry.lastHandoffRequestStepIndex = entry.lastParsedStepIndex;
+        }
+        if (createdMs > 0) {
+          entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
+        }
+        entry.lastStepHasToolCalls = false;
+        entry.lastStepIsCompletedReply = false;
+        entry.lastStepWaitKind = '';
+        entry.lastStepWaitDelayMs = 0;
+        entry.lastStepWaitToolName = '';
+        entry.lastHandoffStepIndex = -1;
+        entry.handoffTargetStepIndex = -1;
+        entry.needsFullHandoffRead = false;
+        entry.handoffRpcPendingMs = 0;
         entry.awaitingHandoffResponse = true;
         return false;
       }
@@ -1261,6 +1287,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.lastStepType = 'USER_INPUT';
       entry.lastStepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
       entry.lastStepHasToolCalls = false;
+      entry.lastStepIsCompletedReply = false;
       entry.lastStepWaitKind = '';
       entry.lastStepWaitDelayMs = 0;
       entry.lastStepWaitToolName = '';
@@ -1268,6 +1295,8 @@ function processTranscriptLine(entry, line, isFirstLine) {
         entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
       }
       entry.awaitingHandoffResponse = false;
+      entry.handoffRpcPendingMs = 0;
+      entry.lastHandoffStepIndex = -1;
       entry.needsFullHandoffRead = false;
       entry.handoffTargetStepIndex = -1;
       if (!isRepeatStep) {
@@ -1299,11 +1328,21 @@ function processTranscriptLine(entry, line, isFirstLine) {
     const hasTools = Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0;
     const prevHadTools = isRepeatStep && Boolean(entry.lastStepHasToolCalls);
     const stepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
-    if (entry.awaitingHandoffResponse && stepIdx >= 0) {
+    const isAfterHandoffRequest =
+      stepIdx < 0 ||
+      typeof entry.lastHandoffRequestStepIndex !== 'number' ||
+      entry.lastHandoffRequestStepIndex < 0 ||
+      stepIdx > entry.lastHandoffRequestStepIndex;
+    if (hasTools) {
+      if (entry.lastHandoffStepIndex === stepIdx) {
+        entry.lastHandoffStepIndex = -1;
+      }
+    } else if (entry.awaitingHandoffResponse && isAfterHandoffRequest && stepIdx >= 0) {
       entry.lastHandoffStepIndex = stepIdx;
     }
     const wasAwaitingHandoff = Boolean(
-      entry.awaitingHandoffResponse || (stepIdx >= 0 && entry.lastHandoffStepIndex === stepIdx)
+      isAfterHandoffRequest &&
+      (entry.awaitingHandoffResponse || (stepIdx >= 0 && entry.lastHandoffStepIndex === stepIdx))
     );
     const waitSpec = hasTools ? classifyToolCallsWait(obj.tool_calls) : { kind: '', delayMs: 0, toolName: '' };
     entry.lastStepType = 'PLANNER_RESPONSE';
@@ -1352,10 +1391,15 @@ function processTranscriptLine(entry, line, isFirstLine) {
         (Array.isArray(obj.truncated_fields) && obj.truncated_fields.includes('content')) ||
         content.includes('\n<truncated ');
       const handoffMatch = /<HANDOFF_PROMPT>\s*([\s\S]*?)\s*<\/HANDOFF_PROMPT>/i.exec(trimmedContent);
-      const extractedHandoff = !isTruncatedContent
+      const canUseStepForHandoff =
+        stepStatus !== 'RUNNING' &&
+        (stepIdx < 0 ||
+          typeof entry.lastHandoffCompletedStepIndex !== 'number' ||
+          stepIdx >= entry.lastHandoffCompletedStepIndex);
+      const extractedHandoff = (!isTruncatedContent && canUseStepForHandoff)
         ? (handoffMatch && handoffMatch[1].trim()
             ? handoffMatch[1].trim()
-            : (wasAwaitingHandoff && stepStatus !== 'RUNNING' && !/<HANDOFF_PROMPT>/i.test(trimmedContent) && !hasTools
+            : (wasAwaitingHandoff && !/<HANDOFF_PROMPT>/i.test(trimmedContent) && !hasTools
                 ? trimmedContent
                 : ''))
         : '';
@@ -1367,10 +1411,12 @@ function processTranscriptLine(entry, line, isFirstLine) {
           entry.lastHandoffCompletedStepIndex = stepIdx;
         }
         entry.awaitingHandoffResponse = false;
+        entry.handoffRpcPendingMs = 0;
         entry.needsFullHandoffRead = false;
         entry.handoffTargetStepIndex = -1;
       } else if (
         isTruncatedContent &&
+        canUseStepForHandoff &&
         (/<HANDOFF_PROMPT>/i.test(trimmedContent) || (wasAwaitingHandoff && !hasTools))
       ) {
         isHandoffStep = true;
@@ -1380,6 +1426,9 @@ function processTranscriptLine(entry, line, isFirstLine) {
           entry.handoffPendingMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
         }
         entry.awaitingHandoffResponse = false;
+        entry.handoffRpcPendingMs = 0;
+      } else if (/<HANDOFF_PROMPT>/i.test(trimmedContent)) {
+        isHandoffStep = true;
       } else if (!wasAwaitingHandoff) {
         const preview = cleanModelPreview(trimmedContent);
         if (preview) {
@@ -1388,13 +1437,15 @@ function processTranscriptLine(entry, line, isFirstLine) {
       }
     }
 
-    if (
+    const isCompletedReply = Boolean(
       !isHandoffStep &&
       !wasAwaitingHandoff &&
       !hasTools &&
       stepStatus !== 'RUNNING' &&
       (entry.promptCount > 0 || entry.lastModelResponse)
-    ) {
+    );
+    entry.lastStepIsCompletedReply = isCompletedReply;
+    if (isCompletedReply) {
       const respTs = createdMs || entry.lastActiveMs || 0;
       if (respTs > 0) {
         entry.lastModelResponseMs = Math.max(entry.lastModelResponseMs || 0, respTs);
@@ -1403,28 +1454,10 @@ function processTranscriptLine(entry, line, isFirstLine) {
 
     entry.pendingSubagentRoles = [];
     if (Array.isArray(obj.tool_calls)) {
-      if (!entry.workspaceCounts || typeof entry.workspaceCounts !== 'object') {
-        entry.workspaceCounts = {};
-      }
       for (const tc of obj.tool_calls) {
         if (tc && tc.name === 'invoke_subagent' && tc.args && typeof tc.args === 'object') {
           const role = tc.args.Role || tc.args.role || tc.args.TypeName || tc.args.type_name || '';
           entry.pendingSubagentRoles.push(typeof role === 'string' ? cleanTranscriptArgString(role).trim() : '');
-        }
-      }
-      if (!isRepeatStep || !prevHadTools) {
-        const rawPaths = extractPathsFromToolCalls(obj.tool_calls);
-        for (const rp of rawPaths) {
-          const root = findGitOrWorkspaceRoot(rp);
-          if (root) {
-            const nextCount = (entry.workspaceCounts[root] || 0) + 1;
-            entry.workspaceCounts[root] = nextCount;
-            const curBest = entry.workspacePath ? (entry.workspaceCounts[entry.workspacePath] || 0) : 0;
-            if (!entry.workspacePath || nextCount >= curBest) {
-              entry.workspacePath = root;
-            }
-            break;
-          }
         }
       }
     }
@@ -1435,6 +1468,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
   if (type === 'CHECKPOINT') {
     if (isRepeatStep) return false;
     if (stepIdx >= 0) entry.lastParsedStepIndex = stepIdx;
+    entry.lastStepIsCompletedReply = false;
     entry.compactCount += 1;
     entry.promptsSinceLastCompact = 0;
     if (entry.lastPlannerTokens > 0) {
@@ -1480,6 +1514,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
     entry.lastStepType = type === 'GENERIC' ? 'GENERIC' : 'SYSTEM_MESSAGE';
     entry.lastStepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
     entry.lastStepHasToolCalls = false;
+    entry.lastStepIsCompletedReply = false;
     entry.lastStepWaitKind = '';
     entry.lastStepWaitDelayMs = 0;
     entry.lastStepWaitToolName = '';
@@ -1553,6 +1588,15 @@ function decodePbtxtString(escaped) {
     i += charStr.length;
   }
   return Buffer.from(bytes).toString('utf-8').trim();
+}
+
+function encodePbtxtString(str) {
+  return String(str || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t');
 }
 
 function extractTitleFromPbtxt(raw) {
@@ -1687,6 +1731,7 @@ function resolveFullHandoffPrompt(entry, transcriptPath) {
     const fRead = fs.readSync(fullFd, fBuf, 0, rSize, Math.max(0, fStat.size - rSize));
     const fLines = fBuf.subarray(0, fRead).toString('utf-8').split('\n');
     const targetStep = typeof entry.handoffTargetStepIndex === 'number' ? entry.handoffTargetStepIndex : -1;
+    const minRequestStep = typeof entry.lastHandoffRequestStepIndex === 'number' ? entry.lastHandoffRequestStepIndex : -1;
 
     for (let i = fLines.length - 1; i >= 0; i--) {
       const fl = fLines[i].trim();
@@ -1694,7 +1739,11 @@ function resolveFullHandoffPrompt(entry, transcriptPath) {
       try {
         const fObj = JSON.parse(fl);
         if (fObj.type !== 'PLANNER_RESPONSE') continue;
-        if (targetStep >= 0 && typeof fObj.step_index === 'number' && fObj.step_index !== targetStep) {
+        if (fObj.status === 'RUNNING') continue;
+        if (targetStep >= 0 && (typeof fObj.step_index !== 'number' || fObj.step_index !== targetStep)) {
+          continue;
+        }
+        if (minRequestStep >= 0 && typeof fObj.step_index === 'number' && fObj.step_index <= minRequestStep) {
           continue;
         }
         if (typeof fObj.content === 'string' && fObj.content.trim()) {
@@ -1737,10 +1786,14 @@ function copyPreservedEntryMeta(target, src) {
   target.modelEnum = src.modelEnum || '';
   target.modelLabel = src.modelLabel || '';
   target.modelResolvedMtimeMs = src.modelResolvedMtimeMs || 0;
+  target.projectId = src.projectId || '';
   target.workspacePath = src.workspacePath || '';
+  target.lsSummary = src.lsSummary || '';
   target.lastViewMs = src.lastViewMs || 0;
   target.lastUserInputMs = src.lastUserInputMs || 0;
   target.lastSeenMs = src.lastSeenMs || 0;
+  target.manualUnreadAtMs = src.manualUnreadAtMs || 0;
+  target.markedAsUnread = Boolean(src.markedAsUnread);
 }
 
 function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
@@ -1902,14 +1955,22 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
   ) {
     entry.lastUserInputMs = Math.floor(stat.mtimeMs);
   }
+  // A completed reply's created_at can be earlier than the moment it finished writing, which may be
+  // after the user already switched away and stamped lastViewMs. Without the mtime the reply looks
+  // older than the view and the blue dot never lights. Do not reintroduce a "mtime within 1 s of
+  // created_at" guard here (regression from 70c1a40). lastStepIsCompletedReply keeps tool-call and
+  // thinking steps from bumping it.
   if (
     entry.lastStepType === 'PLANNER_RESPONSE' &&
-    entry.lastModelResponse &&
-    entry.lastModelResponseMs > 0 &&
-    stat.mtimeMs > entry.lastModelResponseMs &&
-    stat.mtimeMs - entry.lastModelResponseMs < 1000
+    entry.lastStepIsCompletedReply &&
+    stat.mtimeMs > (entry.lastModelResponseMs || 0)
   ) {
-    entry.lastModelResponseMs = Math.floor(stat.mtimeMs);
+    const mtimeFloor = Math.floor(stat.mtimeMs);
+    entry.lastModelResponseMs = mtimeFloor;
+    if (mtimeFloor > (entry.lastActiveMs || 0)) {
+      entry.lastActiveMs = mtimeFloor;
+      entry.lastActiveIso = new Date(mtimeFloor).toISOString();
+    }
   }
   if (!entry.lastActiveMs) {
     entry.lastActiveMs = stat.mtimeMs;
@@ -2182,8 +2243,14 @@ const LSRPC_CONTRACT_SPECS = [
   {
     method: 'UpdateConversationAnnotations',
     critical: false,
-    caller: 'server.cjs:setConversationArchived',
-    purpose: 'Archive/unarchive conversation via RPC (falls back to .pbtxt file edit)'
+    caller: 'server.cjs:setConversationArchived, setConversationUnread, clearConversationUnreadAnnotation, setConversationCustomTitle',
+    purpose: 'Archive/unarchive, rename, and mark conversation unread/read via RPC (falls back to .pbtxt file edit)'
+  },
+  {
+    method: 'GetAllCascadeTrajectories',
+    critical: false,
+    caller: 'server.cjs:syncTrajectoriesFromLanguageServer',
+    purpose: 'Fetch official trajectory projectId, workspaceUris, and default summary from Language Server'
   },
   {
     method: 'DeleteCascadeTrajectory',
@@ -2555,6 +2622,7 @@ function parseCascadeModelConfigs(data) {
   for (const cfg of rawConfigs) {
     if (!cfg || cfg.disabled) continue;
     const label = typeof cfg.label === 'string' ? cfg.label.trim() : '';
+    const isAlias = Boolean(cfg.modelOrAlias && !cfg.modelOrAlias.model && cfg.modelOrAlias.alias);
     const modelEnum =
       (cfg.modelOrAlias && (cfg.modelOrAlias.model || cfg.modelOrAlias.alias)) || '';
     if (!label || !modelEnum || modelEnum === 'MODEL_UNSPECIFIED') continue;
@@ -2583,6 +2651,7 @@ function parseCascadeModelConfigs(data) {
     models.push({
       label,
       modelEnum,
+      isAlias,
       modelId: typeof cfg.modelId === 'string' ? cfg.modelId.trim() : '',
       family,
       tier,
@@ -2891,6 +2960,11 @@ class AgyCockpitServer {
     this.convCache = new Map();
     this.deletedConvIds = new Set();
     this.metadataWorkspaceCache = new Map();
+    this.lsTrajectoryMeta = new Map();
+    this.lsTrajectoriesFetchedAtMs = 0;
+    this.lsTrajectoriesFetchPromise = null;
+    this.trajectoriesInitialSyncDone = false;
+    this.pendingCustomTitleSync = new Set();
     this.annotationTitleCache = new Map();
     this.annotationsDir = path.join(this.appDataDir, 'annotations');
     this.lastAnnotationsDirMtimeMs = 0;
@@ -2943,9 +3017,11 @@ class AgyCockpitServer {
 
     this.pinnedConversations = new Map();
     this.customTitles = new Map();
+    this.defaultTitles = new Map();
     this.archivedDataRaw = {
       pinnedConversations: {},
-      customTitles: {}
+      customTitles: {},
+      defaultTitles: {}
     };
 
     try {
@@ -2964,7 +3040,8 @@ class AgyCockpitServer {
       if (!raw || typeof raw !== 'object') return;
       this.archivedDataRaw = {
         pinnedConversations: {},
-        customTitles: {}
+        customTitles: {},
+        defaultTitles: {}
       };
       this.pinnedConversations.clear();
       if (raw.pinnedConversations && typeof raw.pinnedConversations === 'object') {
@@ -2986,12 +3063,24 @@ class AgyCockpitServer {
         }
       }
       this.customTitles.clear();
+      this.pendingCustomTitleSync.clear();
       if (raw.customTitles && typeof raw.customTitles === 'object' && !Array.isArray(raw.customTitles)) {
         for (const [k, v] of Object.entries(raw.customTitles)) {
           const cleanId = k.trim().toLowerCase();
           const cleanTitle = typeof v === 'string' ? v.trim() : '';
           if (UUID_RE.test(cleanId) && cleanTitle) {
             this.customTitles.set(cleanId, cleanTitle);
+            this.pendingCustomTitleSync.add(cleanId);
+          }
+        }
+      }
+      this.defaultTitles.clear();
+      if (raw.defaultTitles && typeof raw.defaultTitles === 'object' && !Array.isArray(raw.defaultTitles)) {
+        for (const [k, v] of Object.entries(raw.defaultTitles)) {
+          const cleanId = k.trim().toLowerCase();
+          const cleanDefault = typeof v === 'string' ? v.trim() : '';
+          if (UUID_RE.test(cleanId) && cleanDefault) {
+            this.defaultTitles.set(cleanId, cleanDefault);
           }
         }
       }
@@ -3002,10 +3091,12 @@ class AgyCockpitServer {
     try {
       const pinnedObj = Object.fromEntries(this.pinnedConversations.entries());
       const titlesObj = Object.fromEntries(this.customTitles.entries());
+      const defaultsObj = Object.fromEntries(this.defaultTitles.entries());
       const payload = {
         ...(this.archivedDataRaw || {}),
         pinnedConversations: pinnedObj,
         customTitles: titlesObj,
+        defaultTitles: defaultsObj,
         updatedAtMs: Date.now()
       };
       this.archivedDataRaw = payload;
@@ -3030,14 +3121,18 @@ class AgyCockpitServer {
     if (isFile(this.metadataCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.metadataCachePath, 'utf-8'));
-        if (raw && typeof raw === 'object') {
-          for (const [k, v] of Object.entries(raw)) {
+        if (raw && raw.version === 2 && raw.entries && typeof raw.entries === 'object') {
+          for (const [k, v] of Object.entries(raw.entries)) {
             if (v === '__general__') {
               this.metadataWorkspaceCache.set(k, '__general__');
             } else if (typeof v === 'string' && v) {
               this.metadataWorkspaceCache.set(k, resolveCanonicalWorkspace(v));
-            } else if (v && typeof v === 'object' && typeof v.workspacePath === 'string' && v.workspacePath) {
-              this.metadataWorkspaceCache.set(k, resolveCanonicalWorkspace(v.workspacePath));
+            } else if (v && typeof v === 'object') {
+              const projId = typeof v.projectId === 'string' && UUID_RE.test(v.projectId.trim()) ? v.projectId.trim().toLowerCase() : '';
+              const wsPath = typeof v.workspacePath === 'string' && v.workspacePath ? resolveCanonicalWorkspace(v.workspacePath) : '';
+              if (projId || wsPath) {
+                this.metadataWorkspaceCache.set(k, { projectId: projId, workspacePath: wsPath });
+              }
             }
           }
         }
@@ -3048,22 +3143,40 @@ class AgyCockpitServer {
       try {
         const raw = JSON.parse(fs.readFileSync(this.indexCachePath, 'utf-8'));
         if (raw && raw.version === 17 && Array.isArray(raw.entries)) {
+          this.migratedUnreadFlags = new Set();
+          for (const item of raw.entries) {
+            if (item && typeof item.id === 'string' && item.markedAsUnread) {
+              this.migratedUnreadFlags.add(item.id);
+            }
+          }
+        } else if (raw && (raw.version === 18 || raw.version === 19) && Array.isArray(raw.entries)) {
+          const isV19 = raw.version === 19;
           for (const item of raw.entries) {
             if (item && typeof item.id === 'string') {
               item.lastLineOffset = typeof item.lastLineOffset === 'number' ? item.lastLineOffset : 0;
               item.lastParsedStepIndex = typeof item.lastParsedStepIndex === 'number' ? item.lastParsedStepIndex : -1;
               item.lastPlannerStepTok = item.lastPlannerStepTok && typeof item.lastPlannerStepTok === 'object' ? item.lastPlannerStepTok : null;
+              item.lastHandoffRequestStepIndex = typeof item.lastHandoffRequestStepIndex === 'number' ? item.lastHandoffRequestStepIndex : -1;
               item.lastHandoffStepIndex = typeof item.lastHandoffStepIndex === 'number' ? item.lastHandoffStepIndex : -1;
               item.lastHandoffCompletedStepIndex = typeof item.lastHandoffCompletedStepIndex === 'number' ? item.lastHandoffCompletedStepIndex : -1;
+              item.handoffRpcPendingMs = 0;
+              if (item.awaitingHandoffResponse && item.lastHandoffRequestStepIndex < 0 && item.lastParsedStepIndex >= 0) {
+                item.lastHandoffRequestStepIndex = item.lastParsedStepIndex;
+              }
               delete item.handoffUpdatedInPass;
+              item.projectId = isV19 ? (item.projectId || '') : '';
+              item.workspacePath = isV19 ? (item.workspacePath || '') : '';
+              item.lsSummary = isV19 ? (item.lsSummary || '') : '';
               item.lastUserInputMs = item.lastUserInputMs || 0;
               item.lastSeenMs = item.lastSeenMs || 0;
+              item.manualUnreadAtMs = item.manualUnreadAtMs || 0;
               item.markedAsUnread = Boolean(item.markedAsUnread);
               item.lastModelResponse = item.lastModelResponse || '';
               item.lastModelResponseMs = item.lastModelResponseMs || 0;
               item.lastStepType = item.lastStepType || '';
               item.lastStepStatus = item.lastStepStatus || '';
               item.lastStepHasToolCalls = Boolean(item.lastStepHasToolCalls);
+              item.lastStepIsCompletedReply = Boolean(item.lastStepIsCompletedReply);
               item.lastStepWaitKind = item.lastStepWaitKind || '';
               item.lastStepWaitDelayMs = item.lastStepWaitDelayMs || 0;
               item.lastStepWaitToolName = item.lastStepWaitToolName || '';
@@ -3079,6 +3192,9 @@ class AgyCockpitServer {
           if (this.convCache.size > 0) {
             this.initialBootScanDone = true;
           }
+          if (!isV19) {
+            this.scheduleSaveIndexCache();
+          }
         }
       } catch {}
     }
@@ -3092,7 +3208,7 @@ class AgyCockpitServer {
     this.indexCacheDirty = false;
     try {
       const entries = [...this.convCache.values()];
-      writeJsonAtomic(this.indexCachePath, { version: 17, savedAt: Date.now(), entries });
+      writeJsonAtomic(this.indexCachePath, { version: 19, savedAt: Date.now(), entries });
     } catch {}
   }
 
@@ -3113,7 +3229,7 @@ class AgyCockpitServer {
   saveMetadataCache() {
     try {
       const obj = Object.fromEntries(this.metadataWorkspaceCache.entries());
-      writeJsonAtomic(this.metadataCachePath, obj);
+      writeJsonAtomic(this.metadataCachePath, { version: 2, entries: obj });
     } catch {}
   }
 
@@ -3138,7 +3254,7 @@ class AgyCockpitServer {
   resolveConversationAnnotation(convId, forceStat = false) {
     const now = Date.now();
     const cached = this.annotationTitleCache.get(convId);
-    if (!forceStat && cached && now - cached.checkedAtMs < 2500) {
+    if (!forceStat && cached && now - cached.checkedAtMs < 1000) {
       return cached;
     }
 
@@ -3198,16 +3314,210 @@ class AgyCockpitServer {
     }
   }
 
+  syncTrajectoriesFromLanguageServer(force = false) {
+    const now = Date.now();
+    if (this.lsTrajectoriesFetchPromise) {
+      return this.lsTrajectoriesFetchPromise;
+    }
+    if (!force && this.trajectoriesInitialSyncDone) {
+      let hasUnsyncedMainConv = false;
+      for (const [cid, e] of this.convCache.entries()) {
+        if (e && !e.isSubagent && !this.lsTrajectoryMeta.has(cid)) {
+          hasUnsyncedMainConv = true;
+          break;
+        }
+      }
+      if (!hasUnsyncedMainConv && now - this.lsTrajectoriesFetchedAtMs < 3000) {
+        return Promise.resolve(false);
+      }
+    }
+    this.lsTrajectoriesFetchedAtMs = now;
+    this.lsTrajectoriesFetchPromise = (async () => {
+      let anyChanged = false;
+      let metaCacheDirty = false;
+      try {
+        this.refreshProjectsRegistry(false);
+        const res = await callLanguageServerRpc(
+          'GetAllCascadeTrajectories',
+          { excludeSubtrajectories: true },
+          5000
+        );
+        const summaries =
+          (res && res.trajectorySummaries && typeof res.trajectorySummaries === 'object' && res.trajectorySummaries) ||
+          (res && res.data && res.data.trajectorySummaries && typeof res.data.trajectorySummaries === 'object' && res.data.trajectorySummaries) ||
+          null;
+        if (!summaries) {
+          this.trajectoriesInitialSyncDone = true;
+          return false;
+        }
+
+        for (const [rawId, summary] of Object.entries(summaries)) {
+          const cleanId = rawId.trim().toLowerCase();
+          if (!UUID_RE.test(cleanId) || !summary || typeof summary !== 'object') continue;
+          const trajMeta =
+            summary.trajectoryMetadata && typeof summary.trajectoryMetadata === 'object'
+              ? summary.trajectoryMetadata
+              : {};
+          const officialProjectId =
+            typeof trajMeta.projectId === 'string' && UUID_RE.test(trajMeta.projectId.trim())
+              ? trajMeta.projectId.trim().toLowerCase()
+              : '';
+          let officialWsUri = '';
+          if (
+            Array.isArray(trajMeta.workspaceUris) &&
+            trajMeta.workspaceUris.length > 0 &&
+            typeof trajMeta.workspaceUris[0] === 'string'
+          ) {
+            officialWsUri = trajMeta.workspaceUris[0];
+          } else if (
+            Array.isArray(trajMeta.workspaces) &&
+            trajMeta.workspaces.length > 0 &&
+            trajMeta.workspaces[0] &&
+            typeof trajMeta.workspaces[0].workspaceFolderAbsoluteUri === 'string'
+          ) {
+            officialWsUri = trajMeta.workspaces[0].workspaceFolderAbsoluteUri;
+          }
+
+          let resolvedWsPath = '';
+          if (this.projectsRegistry.size > 0) {
+            if (officialProjectId) {
+              const proj = this.projectsRegistry.get(officialProjectId);
+              resolvedWsPath =
+                (proj && proj.primaryPath) ||
+                (officialWsUri ? resolveCanonicalWorkspace(officialWsUri) : '');
+            } else {
+              resolvedWsPath = '';
+            }
+          } else if (officialWsUri) {
+            resolvedWsPath = resolveCanonicalWorkspace(officialWsUri);
+          }
+
+          const lsSummary = typeof summary.summary === 'string' ? summary.summary.trim() : '';
+          const annotTitle =
+            summary.annotations && typeof summary.annotations.title === 'string'
+              ? summary.annotations.title.trim()
+              : '';
+
+          this.lsTrajectoryMeta.set(cleanId, {
+            projectId: officialProjectId,
+            workspacePath: resolvedWsPath,
+            summary: lsSummary,
+            annotTitle
+          });
+
+          const nextCacheVal =
+            officialProjectId || resolvedWsPath
+              ? { projectId: officialProjectId, workspacePath: resolvedWsPath }
+              : '__general__';
+          const prevCacheVal = this.metadataWorkspaceCache.get(cleanId);
+          const cacheSame =
+            nextCacheVal === '__general__'
+              ? prevCacheVal === '__general__'
+              : Boolean(
+                  prevCacheVal &&
+                  typeof prevCacheVal === 'object' &&
+                  prevCacheVal.projectId === nextCacheVal.projectId &&
+                  prevCacheVal.workspacePath === nextCacheVal.workspacePath
+                );
+          if (!cacheSame) {
+            this.metadataWorkspaceCache.set(cleanId, nextCacheVal);
+            metaCacheDirty = true;
+          }
+
+          const entry = this.convCache.get(cleanId);
+          if (entry && !entry.isSubagent) {
+            if ((entry.projectId || '') !== officialProjectId) {
+              entry.projectId = officialProjectId;
+              anyChanged = true;
+            }
+            if ((entry.workspacePath || '') !== resolvedWsPath) {
+              entry.workspacePath = resolvedWsPath;
+              anyChanged = true;
+            }
+            if (lsSummary && entry.lsSummary !== lsSummary) {
+              entry.lsSummary = lsSummary;
+              anyChanged = true;
+            }
+            const effectiveTitle = annotTitle || lsSummary;
+            if (!entry.title && effectiveTitle) {
+              entry.title = effectiveTitle;
+              rebuildSearchCorpus(entry);
+              anyChanged = true;
+            }
+          }
+        }
+
+        if (this.pendingCustomTitleSync && this.pendingCustomTitleSync.size > 0) {
+          const pendingIds = [...this.pendingCustomTitleSync];
+          for (const cid of pendingIds) {
+            const cTitle = this.customTitles.get(cid);
+            if (!cTitle) {
+              this.pendingCustomTitleSync.delete(cid);
+              continue;
+            }
+            const lsMeta = this.lsTrajectoryMeta.get(cid);
+            const annot = this.resolveConversationAnnotation(cid, false);
+            if (annot.title !== cTitle || (lsMeta && lsMeta.annotTitle !== cTitle)) {
+              await this.setConversationCustomTitle(cid, cTitle);
+              anyChanged = true;
+            }
+            this.pendingCustomTitleSync.delete(cid);
+          }
+        }
+
+        this.trajectoriesInitialSyncDone = true;
+        if (metaCacheDirty) {
+          this.saveMetadataCache();
+        }
+        if (anyChanged) {
+          this.markTranscriptDirty({ resetSummary: false, saveIndex: true, bumpStateVersion: true });
+        }
+      } catch {} finally {
+        this.lsTrajectoriesFetchedAtMs = Date.now();
+        this.lsTrajectoriesFetchPromise = null;
+      }
+      return anyChanged;
+    })();
+    return this.lsTrajectoriesFetchPromise;
+  }
+
   applyEntryMetadata(entry, convId, activeConvId = '', activeWorkspaceNorm = '', forceAnnot = false) {
     let changed = false;
+    const lsMeta = this.lsTrajectoryMeta.get(convId);
     if (!entry.isSubagent) {
       const annot = this.resolveConversationAnnotation(convId, forceAnnot);
-      if (annot.title && entry.title !== annot.title) {
-        entry.title = annot.title;
+      if (lsMeta && lsMeta.summary && entry.lsSummary !== lsMeta.summary) {
+        entry.lsSummary = lsMeta.summary;
+        changed = true;
+      }
+      const existingCustom = this.customTitles.get(convId) || '';
+      const savedDefault = this.defaultTitles.get(convId) || '';
+      if (
+        annot.title &&
+        existingCustom &&
+        annot.title !== existingCustom &&
+        annot.title !== savedDefault &&
+        !(this.pendingCustomTitleSync && this.pendingCustomTitleSync.has(convId))
+      ) {
+        this.customTitles.set(convId, annot.title);
+        this.saveArchivedData();
+        changed = true;
+      }
+      const effectiveTitle =
+        annot.title ||
+        (lsMeta && lsMeta.annotTitle) ||
+        (lsMeta && lsMeta.summary) ||
+        '';
+      if (effectiveTitle && entry.title !== effectiveTitle) {
+        entry.title = effectiveTitle;
         rebuildSearchCorpus(entry);
         changed = true;
       }
+      // last_user_view_time is stamped with the SAME value on both chats of every switch (left and
+      // entered) and again while the user interacts with the open chat. It means "the user was around
+      // this chat at T", not "this chat is open now"; never infer the open chat from max(lastViewMs).
       if (annot.lastViewMs && annot.lastViewMs > (entry.lastViewMs || 0)) {
+        this.debugTrace({ ev: 'annotView', id: convId.slice(0, 8), from: entry.lastViewMs || 0, to: annot.lastViewMs });
         entry.lastViewMs = annot.lastViewMs;
         changed = true;
       }
@@ -3216,35 +3526,121 @@ class AgyCockpitServer {
         entry.archived = nextArchived;
         changed = true;
       }
+      if (entry.manualUnreadAtMs > 0) {
+        const clearedByActivity =
+          (entry.lastSeenMs || 0) >= entry.manualUnreadAtMs ||
+          (entry.lastViewMs || 0) >= entry.manualUnreadAtMs ||
+          (entry.lastUserInputMs || 0) >= entry.manualUnreadAtMs ||
+          ((annot.mtimeMs || 0) > entry.manualUnreadAtMs && !annot.markedAsUnread);
+        if (clearedByActivity) {
+          entry.manualUnreadAtMs = 0;
+          changed = true;
+        }
+      }
       const nextUnreadFlag = Boolean(
-        annot.markedAsUnread && (annot.mtimeMs || 0) > (entry.lastSeenMs || 0)
+        entry.manualUnreadAtMs > 0 ||
+        (annot.markedAsUnread && (annot.mtimeMs || 0) > (entry.lastSeenMs || 0))
       );
       if (Boolean(entry.markedAsUnread) !== nextUnreadFlag) {
         entry.markedAsUnread = nextUnreadFlag;
         changed = true;
       }
     }
-    const cachedWs = this.metadataWorkspaceCache.get(convId);
-    const isExplicitGeneral = cachedWs === '__general__';
-    if (!entry.workspacePath && typeof cachedWs === 'string' && cachedWs && !isExplicitGeneral) {
-      entry.workspacePath = cachedWs;
-      changed = true;
-    }
-    if (
-      !isExplicitGeneral &&
-      convId === activeConvId &&
-      activeWorkspaceNorm &&
-      !entry.workspacePath &&
-      entry.promptCount <= 1 &&
-      entry.lastActiveMs > 0 &&
-      Date.now() - entry.lastActiveMs < 10 * 60 * 1000
-    ) {
-      entry.workspacePath = activeWorkspaceNorm;
-      this.metadataWorkspaceCache.set(convId, activeWorkspaceNorm);
-      this.saveMetadataCache();
-      changed = true;
+    if (lsMeta) {
+      const nextProjId = lsMeta.projectId || '';
+      const nextWsPath = lsMeta.workspacePath || '';
+      if ((entry.projectId || '') !== nextProjId) {
+        entry.projectId = nextProjId;
+        changed = true;
+      }
+      if ((entry.workspacePath || '') !== nextWsPath) {
+        entry.workspacePath = nextWsPath;
+        changed = true;
+      }
+    } else {
+      const cachedMeta = this.metadataWorkspaceCache.get(convId);
+      if (cachedMeta === '__general__') {
+        if (entry.projectId || entry.workspacePath) {
+          entry.projectId = '';
+          entry.workspacePath = '';
+          changed = true;
+        }
+      } else if (cachedMeta && typeof cachedMeta === 'object') {
+        const nextProjId = cachedMeta.projectId || '';
+        const nextWsPath = cachedMeta.workspacePath || '';
+        if ((entry.projectId || '') !== nextProjId) {
+          entry.projectId = nextProjId;
+          changed = true;
+        }
+        if ((entry.workspacePath || '') !== nextWsPath) {
+          entry.workspacePath = nextWsPath;
+          changed = true;
+        }
+      } else if (typeof cachedMeta === 'string' && cachedMeta) {
+        if (!entry.workspacePath) {
+          entry.workspacePath = cachedMeta;
+          changed = true;
+        }
+      } else if (this.trajectoriesInitialSyncDone && this.projectsRegistry.size > 0 && (entry.workspacePath || entry.projectId)) {
+        entry.projectId = '';
+        entry.workspacePath = '';
+        changed = true;
+      }
     }
     return changed;
+  }
+
+  // Opt-in unread/claim tracing. Enabled while <appDataDir>/scratch/agy-cockpit-trace.on exists; records
+  // go to agy-cockpit-trace.jsonl next to it (a directory agents can read from their sandbox). The UI
+  // learns the state through traceEnabled in /api/status and posts its own records to /api/debug-trace.
+  // See "Unread / Blue Dot Debugging" in AGENTS.md.
+  isTraceEnabled() {
+    const now = Date.now();
+    if (now - (this.traceCheckedAtMs || 0) < 2000) return Boolean(this.traceEnabled);
+    this.traceCheckedAtMs = now;
+    const dir = path.join(this.appDataDir, 'scratch');
+    this.traceFile = path.join(dir, 'agy-cockpit-trace.jsonl');
+    this.traceEnabled = isFile(path.join(dir, 'agy-cockpit-trace.on'));
+    if (this.traceEnabled) {
+      try {
+        const size = fs.statSync(this.traceFile, { throwIfNoEntry: false })?.size || 0;
+        if (size > 20 * 1024 * 1024) fs.renameSync(this.traceFile, this.traceFile + '.1');
+      } catch {}
+    }
+    return this.traceEnabled;
+  }
+
+  debugTrace(rec) {
+    if (!this.isTraceEnabled()) return;
+    try {
+      fs.appendFileSync(this.traceFile, JSON.stringify(Object.assign({ src: 'server', t: Date.now() }, rec)) + '\n');
+    } catch {}
+  }
+
+  clearConversationUnreadAnnotation(cleanId) {
+    const pbtxtPath = path.join(this.annotationsDir, `${cleanId}.pbtxt`);
+    try {
+      if (isFile(pbtxtPath)) {
+        const existingRaw = fs.readFileSync(pbtxtPath, 'utf-8');
+        const parsed = existingRaw ? extractAnnotationFromPbtxt(existingRaw) : null;
+        if (parsed && parsed.markedAsUnread) {
+          let updatedRaw = existingRaw.replace(/^\s*marked_as_unread\s*:\s*(?:true|false)\s*$/gim, '').trim();
+          if (updatedRaw) updatedRaw += '\n';
+          fs.writeFileSync(pbtxtPath, updatedRaw, 'utf-8');
+          this.annotationTitleCache.delete(cleanId);
+          this.resolveConversationAnnotation(cleanId, true);
+        }
+      }
+    } catch {}
+    void callLanguageServerRpc(
+      'UpdateConversationAnnotations',
+      {
+        cascadeId: cleanId,
+        annotations: { markedAsUnread: false },
+        mergeAnnotations: true
+      },
+      4000
+    ).catch(() => {});
   }
 
   markConversationSeen(convId, bumpViewTime = false) {
@@ -3252,6 +3648,14 @@ class AgyCockpitServer {
     if (!UUID_RE.test(cleanId)) return false;
     const entry = this.convCache.get(cleanId);
     if (!entry) return false;
+    if (this.isTraceEnabled()) {
+      this.debugTrace({
+        ev: 'markSeen', id: cleanId.slice(0, 8), bump: bumpViewTime,
+        lastSeenMs: entry.lastSeenMs || 0, lastViewMs: entry.lastViewMs || 0,
+        lastModelResponseMs: entry.lastModelResponseMs || 0,
+        caller: (new Error().stack || '').split('\n')[2]?.trim() || ''
+      });
+    }
     let changed = false;
     if (bumpViewTime) {
       const nowMs = Date.now();
@@ -3260,16 +3664,25 @@ class AgyCockpitServer {
         changed = true;
       }
     }
+    const prevAnnot = this.annotationTitleCache.get(cleanId);
+    if (entry.markedAsUnread || entry.manualUnreadAtMs > 0 || (prevAnnot && prevAnnot.markedAsUnread)) {
+      this.clearConversationUnreadAnnotation(cleanId);
+    }
     const annot = this.annotationTitleCache.get(cleanId);
     const targetMs = Math.max(
       entry.lastSeenMs || 0,
       entry.lastViewMs || 0,
       entry.lastUserInputMs || 0,
       entry.lastModelResponseMs || 0,
+      entry.manualUnreadAtMs || 0,
       annot && annot.mtimeMs ? Math.ceil(annot.mtimeMs) : 0
     );
     if (targetMs > (entry.lastSeenMs || 0)) {
       entry.lastSeenMs = targetMs;
+      changed = true;
+    }
+    if (entry.manualUnreadAtMs) {
+      entry.manualUnreadAtMs = 0;
       changed = true;
     }
     if (entry.markedAsUnread) {
@@ -3280,6 +3693,92 @@ class AgyCockpitServer {
       this.markTranscriptDirty({ resetSummary: false, saveIndex: true });
     }
     return changed;
+  }
+
+  async setConversationUnread(convId, unread) {
+    const cleanId = (convId || '').trim().toLowerCase();
+    if (!UUID_RE.test(cleanId)) {
+      return { status: 400, body: { error: 'Invalid conversation id' } };
+    }
+    const nextUnread = Boolean(unread);
+    if (this.isTraceEnabled()) {
+      this.debugTrace({ ev: 'setUnread', id: cleanId.slice(0, 8), unread: nextUnread });
+    }
+    if (!nextUnread) {
+      this.markConversationSeen(cleanId, true);
+      this.clearConversationUnreadAnnotation(cleanId);
+      this.markTranscriptDirty({ resetSummary: false, saveIndex: true, bumpStateVersion: true });
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          conversationId: cleanId,
+          unread: false
+        }
+      };
+    }
+
+    const pbtxtPath = path.join(this.annotationsDir, `${cleanId}.pbtxt`);
+    let existingRaw = '';
+    try {
+      if (isFile(pbtxtPath)) {
+        existingRaw = fs.readFileSync(pbtxtPath, 'utf-8');
+      }
+    } catch {}
+
+    try {
+      await callLanguageServerRpc(
+        'UpdateConversationAnnotations',
+        {
+          cascadeId: cleanId,
+          annotations: {
+            markedAsUnread: true
+          },
+          mergeAnnotations: true
+        },
+        4000
+      );
+    } catch {}
+
+    try {
+      let postRpcRaw = existingRaw;
+      if (isFile(pbtxtPath)) {
+        postRpcRaw = fs.readFileSync(pbtxtPath, 'utf-8');
+      }
+      fs.mkdirSync(this.annotationsDir, { recursive: true });
+      let updatedRaw = (postRpcRaw || '').replace(/^\s*marked_as_unread\s*:\s*(?:true|false)\s*$/gim, '').trim();
+      updatedRaw = (updatedRaw ? updatedRaw + '\n' : '') + 'marked_as_unread: true\n';
+      fs.writeFileSync(pbtxtPath, updatedRaw, 'utf-8');
+    } catch {}
+
+    this.annotationTitleCache.delete(cleanId);
+    const annot = this.resolveConversationAnnotation(cleanId, true);
+    const entry = this.convCache.get(cleanId);
+    if (entry) {
+      const minBaselineMs = Math.max(
+        entry.lastModelResponseMs || 0,
+        entry.lastViewMs || 0,
+        entry.lastUserInputMs || 0
+      );
+      const markMs = Math.max(
+        Date.now(),
+        annot && annot.mtimeMs ? Math.ceil(annot.mtimeMs) : 0,
+        minBaselineMs + 1
+      );
+      const maxFloorMs = annot && annot.mtimeMs > 0 ? Math.floor(annot.mtimeMs) - 1 : markMs - 1;
+      entry.lastSeenMs = Math.min(Math.max(entry.lastSeenMs || 0, minBaselineMs), maxFloorMs);
+      entry.manualUnreadAtMs = markMs;
+      entry.markedAsUnread = true;
+    }
+    this.markTranscriptDirty({ resetSummary: false, saveIndex: true, bumpStateVersion: true });
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        conversationId: cleanId,
+        unread: true
+      }
+    };
   }
 
   async setConversationArchived(convId, archived) {
@@ -3397,13 +3896,18 @@ class AgyCockpitServer {
 
     this.convCache.delete(cleanId);
     this.deletedConvIds.add(cleanId);
+    this.lsTrajectoryMeta.delete(cleanId);
+    if (this.pendingCustomTitleSync) {
+      this.pendingCustomTitleSync.delete(cleanId);
+    }
     if (this.metadataWorkspaceCache.delete(cleanId)) {
       this.saveMetadataCache();
     }
     this.annotationTitleCache.delete(cleanId);
     const hadPin = this.pinnedConversations.delete(cleanId);
     const hadTitle = this.customTitles.delete(cleanId);
-    if (hadPin || hadTitle) {
+    const hadDefault = this.defaultTitles.delete(cleanId);
+    if (hadPin || hadTitle || hadDefault) {
       this.saveArchivedData();
     }
     this.lastFullScanMs = 0;
@@ -3448,8 +3952,11 @@ class AgyCockpitServer {
   }
 
   resolveEntryDisplayMeta(entry) {
+    const rawProjId = (entry && entry.projectId) || '';
     const rawWsPath = (entry && entry.workspacePath) || '';
-    const matchedProj = this.matchProjectForWorkspace(rawWsPath);
+    const matchedProj =
+      (rawProjId && this.projectsRegistry.get(rawProjId)) ||
+      this.matchProjectForWorkspace(rawWsPath);
     const effectiveWsPath = matchedProj
       ? (matchedProj.primaryPath || rawWsPath)
       : rawWsPath;
@@ -3460,35 +3967,126 @@ class AgyCockpitServer {
       ? matchedProj.name
       : getWorkspaceLabel(effectiveWsPath);
     const customTitle = (entry && this.customTitles.get(entry.id)) || '';
-    const defaultTitle = entry
-      ? (entry.title || entry.firstPrompt || entry.lastPrompt || ('Conversation ' + entry.id.slice(0, 8)))
+    const savedDefault = (entry && this.defaultTitles.get(entry.id)) || '';
+    const baseDefault = entry
+      ? (savedDefault ||
+         (entry.lsSummary && entry.lsSummary !== customTitle && entry.lsSummary) ||
+         (entry.title && entry.title !== customTitle && entry.title) ||
+         entry.firstPrompt ||
+         entry.lastPrompt ||
+         entry.title ||
+         ('Conversation ' + entry.id.slice(0, 8)))
       : '';
     return {
       matchedProj,
-      projectId: matchedProj ? matchedProj.id : '',
+      projectId: matchedProj ? matchedProj.id : rawProjId,
       workspacePath: effectiveWsPath,
       workspaceKey: effectiveWsKey,
       workspaceName: effectiveWsName,
       customTitle,
-      defaultTitle,
+      defaultTitle: baseDefault,
       title: customTitle || (entry && entry.title) || ''
     };
   }
 
-  setConversationCustomTitle(convId, title) {
+  async setConversationCustomTitle(convId, title) {
     const cleanId = (convId || '').trim().toLowerCase();
     if (!UUID_RE.test(cleanId)) {
       return { status: 400, body: { error: 'Invalid conversation id' } };
     }
     const cleanTitle = typeof title === 'string' ? title.trim() : '';
+    if (this.pendingCustomTitleSync) {
+      this.pendingCustomTitleSync.delete(cleanId);
+    }
+
+    const entry = this.convCache.get(cleanId);
+    const lsMeta = this.lsTrajectoryMeta.get(cleanId);
+    const prevCustom = this.customTitles.get(cleanId) || '';
+
+    const pbtxtPath = path.join(this.annotationsDir, `${cleanId}.pbtxt`);
+    let existingRaw = '';
+    try {
+      if (isFile(pbtxtPath)) {
+        existingRaw = fs.readFileSync(pbtxtPath, 'utf-8');
+      }
+    } catch {}
+    const preAnnot = existingRaw ? extractAnnotationFromPbtxt(existingRaw) : { title: '' };
+
     if (cleanTitle) {
+      if (!this.defaultTitles.has(cleanId)) {
+        const origCandidate =
+          (preAnnot.title && preAnnot.title !== cleanTitle && preAnnot.title !== prevCustom && preAnnot.title) ||
+          (entry && entry.title && entry.title !== cleanTitle && entry.title !== prevCustom && entry.title) ||
+          (lsMeta && lsMeta.summary && lsMeta.summary !== cleanTitle && lsMeta.summary !== prevCustom && lsMeta.summary) ||
+          '';
+        if (origCandidate) {
+          this.defaultTitles.set(cleanId, origCandidate);
+        }
+      }
       this.customTitles.set(cleanId, cleanTitle);
     } else {
       this.customTitles.delete(cleanId);
     }
+
+    const savedDefault = this.defaultTitles.get(cleanId) || '';
+    if (!cleanTitle) {
+      this.defaultTitles.delete(cleanId);
+    }
     this.saveArchivedData();
-    this.markTranscriptDirty({ resetSummary: false, saveIndex: false, bumpStateVersion: true });
-    const entry = this.convCache.get(cleanId);
+
+    const fallbackTitle =
+      savedDefault ||
+      (entry && entry.lsSummary && entry.lsSummary !== prevCustom ? entry.lsSummary : '') ||
+      (lsMeta && lsMeta.summary && lsMeta.summary !== prevCustom ? lsMeta.summary : '') ||
+      (entry && entry.firstPrompt ? entry.firstPrompt.split('\n')[0].trim().slice(0, 100) : '') ||
+      '';
+    const targetOfficialTitle = cleanTitle || fallbackTitle;
+
+    try {
+      await callLanguageServerRpc(
+        'UpdateConversationAnnotations',
+        {
+          cascadeId: cleanId,
+          annotations: {
+            title: targetOfficialTitle
+          },
+          mergeAnnotations: true
+        },
+        4000
+      );
+    } catch {}
+
+    try {
+      let postRpcRaw = existingRaw;
+      if (isFile(pbtxtPath)) {
+        postRpcRaw = fs.readFileSync(pbtxtPath, 'utf-8');
+      }
+      const postRpcAnnot = postRpcRaw ? extractAnnotationFromPbtxt(postRpcRaw) : null;
+      if (!postRpcAnnot || (postRpcAnnot.title || '') !== targetOfficialTitle) {
+        fs.mkdirSync(this.annotationsDir, { recursive: true });
+        let updatedRaw = (postRpcRaw || '').replace(/\btitle\s*:\s*"(?:[^"\\]|\\.)*"\s*/g, '').trim();
+        if (targetOfficialTitle) {
+          const encodedTitle = encodePbtxtString(targetOfficialTitle);
+          updatedRaw = `title: "${encodedTitle}"` + (updatedRaw ? `\n${updatedRaw}` : '') + '\n';
+        } else if (updatedRaw) {
+          updatedRaw = updatedRaw + '\n';
+        }
+        if (updatedRaw || isFile(pbtxtPath)) {
+          fs.writeFileSync(pbtxtPath, updatedRaw, 'utf-8');
+        }
+      }
+    } catch {}
+
+    this.annotationTitleCache.delete(cleanId);
+    this.resolveConversationAnnotation(cleanId, true);
+    if (lsMeta) {
+      lsMeta.annotTitle = targetOfficialTitle;
+    }
+    if (entry) {
+      entry.title = targetOfficialTitle || entry.lsSummary || entry.title || '';
+      rebuildSearchCorpus(entry);
+    }
+    this.markTranscriptDirty({ resetSummary: false, saveIndex: true, bumpStateVersion: true });
     const meta = this.resolveEntryDisplayMeta(entry);
     return {
       status: 200,
@@ -3497,7 +4095,7 @@ class AgyCockpitServer {
         id: cleanId,
         conversationId: cleanId,
         customTitle: cleanTitle,
-        title: meta.title,
+        title: meta.title || cleanTitle || targetOfficialTitle,
         defaultTitle: meta.defaultTitle
       }
     };
@@ -3721,6 +4319,7 @@ class AgyCockpitServer {
     const activeWorkspaceNorm = activeWorkspaceUris.length > 0
       ? resolveCanonicalWorkspace(activeWorkspaceUris[0])
       : '';
+    const activeWsKey = workspaceComparisonKey(activeWorkspaceNorm);
 
     let anyTranscriptChanged = false;
     const now = Date.now();
@@ -3753,7 +4352,6 @@ class AgyCockpitServer {
           dirents = fs.readdirSync(this.brainDir, { withFileTypes: true });
         } catch {}
 
-        const activeWsKey = workspaceComparisonKey(activeWorkspaceNorm);
         const seenIds = new Set();
         const isFirstBootScan = !this.initialBootScanDone;
         for (const d of dirents) {
@@ -3772,16 +4370,21 @@ class AgyCockpitServer {
           }
           if (isFirstBootScan) {
             const loaded = this.convCache.get(convId);
-            if (loaded && !loaded.lastSeenMs) {
-              loaded.lastSeenMs = Math.max(
-                loaded.lastViewMs || 0,
-                loaded.lastUserInputMs || 0,
-                loaded.lastModelResponseMs || 0
-              );
+            if (loaded) {
+              if (this.migratedUnreadFlags && this.migratedUnreadFlags.has(convId)) {
+                loaded.markedAsUnread = true;
+              } else if (!loaded.lastSeenMs) {
+                loaded.lastSeenMs = Math.max(
+                  loaded.lastViewMs || 0,
+                  loaded.lastUserInputMs || 0,
+                  loaded.lastModelResponseMs || 0
+                );
+              }
             }
           }
         }
         this.initialBootScanDone = true;
+        this.migratedUnreadFlags = null;
 
         for (const [cachedId, cachedEntry] of this.convCache.entries()) {
           if (!seenIds.has(cachedId)) {
@@ -3807,8 +4410,21 @@ class AgyCockpitServer {
           : [...this.convCache.values()];
         let mainChecked = 0;
         for (const entry of candidates) {
+          const entrySeenBaseline = Math.max(
+            entry.lastSeenMs || 0,
+            entry.lastViewMs || 0,
+            entry.lastUserInputMs || 0
+          );
+          const isUnreadEntry = Boolean(
+            !entry.isSubagent &&
+            (entry.markedAsUnread ||
+              (entry.lastModelResponse &&
+                entry.lastModelResponseMs > 0 &&
+                entry.lastModelResponseMs > entrySeenBaseline))
+          );
           const isHot =
             mainChecked < 8 ||
+            isUnreadEntry ||
             now - (entry.lastActiveMs || 0) < 15 * 60 * 1000 ||
             isEntryThinking(entry, now) ||
             Boolean(getEntryWaitState(entry, now)) ||
@@ -3836,13 +4452,23 @@ class AgyCockpitServer {
           }
         }
 
-        if (annotDirMtimeMs !== this.lastAnnotationsDirMtimeMs) {
+        const scanAllAnnotations =
+          annotDirMtimeMs !== this.lastAnnotationsDirMtimeMs ||
+          now - (this.lastAnnotationsScanMs || 0) >= 3000;
+        if (scanAllAnnotations) {
           this.lastAnnotationsDirMtimeMs = annotDirMtimeMs;
-          for (const [convId, entry] of this.convCache.entries()) {
-            if (entry.isSubagent || hotIds.has(convId)) continue;
-            if (this.applyEntryMetadata(entry, convId, activeConvId, activeWorkspaceNorm, false)) {
-              anyTranscriptChanged = true;
-            }
+          this.lastAnnotationsScanMs = now;
+        }
+        for (const [convId, entry] of this.convCache.entries()) {
+          if (entry.isSubagent || hotIds.has(convId)) continue;
+          const inActiveWs = Boolean(
+            activeWsKey &&
+            entry.workspacePath &&
+            workspaceComparisonKey(entry.workspacePath) === activeWsKey
+          );
+          if (!scanAllAnnotations && !inActiveWs) continue;
+          if (this.applyEntryMetadata(entry, convId, activeConvId, activeWorkspaceNorm, false)) {
+            anyTranscriptChanged = true;
           }
         }
       }
@@ -4121,6 +4747,7 @@ class AgyCockpitServer {
   }
 
   triggerBackgroundModelResolution(hostConvId, visibleEntries) {
+    void this.syncTrajectoriesFromLanguageServer(false);
     void this.getModelsCatalog(false);
     void this.refreshQuotaSummary();
     const candidateIds = [];
@@ -4924,6 +5551,12 @@ class AgyCockpitServer {
 
     const { waitState, waitToolName, isThinking, subagents } = this.resolveSubagentsState(entry);
 
+    // Blue dot rule: the last step is a finished reply (no tool calls, not RUNNING), nothing is thinking
+    // or waiting, and that reply is newer than every "seen" signal. Seen is only raised by an explicit
+    // Cockpit open (POST /api/conversation-seen), by the claim-holding iframe when its chat completes,
+    // or by viewedConvId, which ui.html only sends from the claim holder. Hidden aux pane iframes keep
+    // polling, so a new server-side seen path that ignores the claim will eat dots (see ui.html notes
+    // above ACTIVE_CONV_STORAGE_KEY).
     const seenBaselineMs = Math.max(
       entry.lastSeenMs || 0,
       entry.lastViewMs || 0,
@@ -4938,6 +5571,12 @@ class AgyCockpitServer {
 
     const pinnedAtMs = this.pinnedConversations.get(entry.id) || 0;
     const pinned = pinnedAtMs > 0;
+
+    const awaitingHandoffResponse = Boolean(
+      entry.awaitingHandoffResponse ||
+      entry.needsFullHandoffRead ||
+      (entry.handoffRpcPendingMs && Date.now() - entry.handoffRpcPendingMs < 30000)
+    );
 
     return {
       id: entry.id,
@@ -4955,6 +5594,7 @@ class AgyCockpitServer {
       lastSeenMs: entry.lastSeenMs || 0,
       latestHandoffMs: entry.latestHandoffMs || 0,
       latestHandoffPrompt: entry.latestHandoffPrompt || '',
+      awaitingHandoffResponse,
       compactCount: entry.compactCount || 0,
       lastCompactMs: entry.lastCompactMs || 0,
       promptsSinceLastCompact: entry.promptsSinceLastCompact || 0,
@@ -5026,8 +5666,49 @@ class AgyCockpitServer {
     if (UUID_RE.test(viewedConvId)) {
       const viewedEntry = this.convCache.get(viewedConvId);
       const viewedState = viewedEntry ? this.resolveSubagentsState(viewedEntry) : null;
-      if (viewedState && !viewedState.isThinking && !viewedState.waitState) {
-        this.markConversationSeen(viewedConvId);
+      if (viewedEntry && !viewedEntry.markedAsUnread && viewedState && !viewedState.isThinking && !viewedState.waitState) {
+        const myFocusMs = Math.max(viewedEntry.lastViewMs || 0, viewedEntry.lastUserInputMs || 0);
+        let newerFocusElsewhere = false;
+        for (const e of sortedEntries) {
+          if (e.isSubagent || e.archived || e.id === viewedConvId) continue;
+          const otherFocusMs = Math.max(e.lastViewMs || 0, e.lastUserInputMs || 0);
+          if (otherFocusMs > myFocusMs) {
+            newerFocusElsewhere = true;
+            break;
+          }
+        }
+        if (!newerFocusElsewhere) {
+          this.markConversationSeen(viewedConvId);
+        }
+      }
+    }
+
+    if (this.isTraceEnabled()) {
+      const traceNow = Date.now();
+      const rows = [];
+      for (const e of sortedEntries) {
+        if (e.isSubagent) continue;
+        const st = this.resolveSubagentsState(e);
+        const baseline = Math.max(e.lastSeenMs || 0, e.lastViewMs || 0, e.lastUserInputMs || 0);
+        const unread = Boolean(
+          !st.isThinking && !st.waitState &&
+          (((e.lastModelResponseMs || 0) > baseline) || e.markedAsUnread)
+        );
+        const recent = Math.max(e.lastViewMs || 0, e.lastUserInputMs || 0, e.lastModelResponseMs || 0) > traceNow - 10 * 60 * 1000;
+        if (!recent && !unread && !st.isThinking) continue;
+        rows.push([
+          e.id.slice(0, 8), st.isThinking ? 'T' : (st.waitState || '-'), unread ? 'U' : '-',
+          e.lastStepType, e.lastStepIsCompletedReply ? 'C' : '-',
+          e.lastUserInputMs || 0, e.lastViewMs || 0, e.lastSeenMs || 0, e.lastModelResponseMs || 0
+        ]);
+      }
+      const sig = JSON.stringify([hostConvId, viewedConvId, rows]);
+      if (sig !== this.lastTraceSig) {
+        this.lastTraceSig = sig;
+        this.debugTrace({
+          ev: 'status', activeConvId: hostConvId.slice(0, 8), viewedConvId: viewedConvId.slice(0, 8),
+          cols: 'id,state,unread,lastStep,completed,userIn,view,seen,resp', rows
+        });
       }
     }
 
@@ -5101,8 +5782,10 @@ class AgyCockpitServer {
           hiddenMainItems.push([e.id, e.lastActiveMs, e.latestHandoffMs, e.currentTokens, e.totalTokens, e.promptCount, e.compactCount]);
           return false;
         }
-        if (hasProjectsRegistry && e.workspacePath) {
-          const proj = this.matchProjectForWorkspace(e.workspacePath);
+        if (hasProjectsRegistry && (e.projectId || e.workspacePath)) {
+          const proj =
+            (e.projectId && this.projectsRegistry.get(e.projectId)) ||
+            this.matchProjectForWorkspace(e.workspacePath);
           if (!proj) {
             hiddenMainItems.push([e.id, e.lastActiveMs, e.latestHandoffMs, e.currentTokens, e.totalTokens, e.promptCount, e.compactCount]);
             return false;
@@ -5198,6 +5881,7 @@ class AgyCockpitServer {
           c.lastViewMs,
           c.lastSeenMs,
           c.latestHandoffMs,
+          c.awaitingHandoffResponse,
           c.compactCount,
           c.pollution.id,
           c.promptCount,
@@ -5242,6 +5926,7 @@ class AgyCockpitServer {
 
     if (isForce) {
       void this.refreshQuotaSummary({ maxAgeMs: 15000 });
+      void this.syncTrajectoriesFromLanguageServer(true);
     }
     this.triggerBackgroundModelResolution(hostConvId, visibleEntries);
 
@@ -5268,6 +5953,7 @@ class AgyCockpitServer {
         unchanged: true,
         version: this.stateVersion,
         uiMtimeMs,
+        traceEnabled: this.isTraceEnabled(),
         refreshMs: Number(this.lastRefreshDurationMs.toFixed(2))
       };
     }
@@ -5277,9 +5963,11 @@ class AgyCockpitServer {
       !this.deletedConvIds.has(hostConvId) &&
       !cards.some((c) => c.id === hostConvId)
     ) {
-      const isWorkspaceVisible = (wsPath) => {
-        if (!hasProjectsRegistry || !wsPath) return true;
-        const proj = this.matchProjectForWorkspace(wsPath);
+      const isWorkspaceVisible = (wsPath, projId = '') => {
+        if (!hasProjectsRegistry || (!wsPath && !projId)) return true;
+        const proj =
+          (projId && this.projectsRegistry.get(projId)) ||
+          this.matchProjectForWorkspace(wsPath);
         return Boolean(proj && !proj.archived);
       };
       const hostEntry = sortedEntries.find((e) => e.id === hostConvId);
@@ -5287,16 +5975,26 @@ class AgyCockpitServer {
         hostEntry &&
         !hostEntry.archived &&
         !hostEntry.isSubagent &&
-        isWorkspaceVisible(hostEntry.workspacePath)
+        isWorkspaceVisible(hostEntry.workspacePath, hostEntry.projectId)
       ) {
         cards = [this.buildConversationCard(hostEntry, globalObservedCeiling, subagentTokens), ...cards];
       } else if (!hostEntry) {
-        const cachedWs = this.metadataWorkspaceCache.get(hostConvId) || '';
-        const candidateWs = cachedWs === '__general__'
-          ? ''
-          : (detectedActiveWorkspaceNorm || cachedWs || '');
-        if (isWorkspaceVisible(candidateWs)) {
+        const lsMeta = this.lsTrajectoryMeta.get(hostConvId);
+        const cachedMeta = this.metadataWorkspaceCache.get(hostConvId);
+        let candidateProjId = '';
+        let candidateWs = '';
+        if (lsMeta) {
+          candidateProjId = lsMeta.projectId || '';
+          candidateWs = lsMeta.workspacePath || '';
+        } else if (cachedMeta && typeof cachedMeta === 'object') {
+          candidateProjId = cachedMeta.projectId || '';
+          candidateWs = cachedMeta.workspacePath || '';
+        } else if (typeof cachedMeta === 'string' && cachedMeta && cachedMeta !== '__general__') {
+          candidateWs = cachedMeta;
+        }
+        if (isWorkspaceVisible(candidateWs, candidateProjId)) {
           const placeholderEntry = createEmptyEntry(hostConvId);
+          placeholderEntry.projectId = candidateProjId;
           placeholderEntry.workspacePath = candidateWs;
           cards = [this.buildConversationCard(placeholderEntry, globalObservedCeiling, subagentTokens), ...cards];
         }
@@ -5371,6 +6069,7 @@ class AgyCockpitServer {
       unchanged: false,
       version: this.stateVersion,
       uiMtimeMs,
+      traceEnabled: this.isTraceEnabled(),
       refreshMs: Number(this.lastRefreshDurationMs.toFixed(2)),
       hostConversationId: hostConvId || null,
       activeWorkspaceKey: activeWorkspaceKey || '',
@@ -5560,6 +6259,9 @@ class AgyCockpitServer {
     const query = Object.fromEntries(urlObj.searchParams.entries());
 
     if (req.method === 'GET' && pathname === '/api/status') {
+      if (!this.trajectoriesInitialSyncDone) {
+        await this.syncTrajectoriesFromLanguageServer(false);
+      }
       const payload = this.handleStatusRequest(query);
       sendJson(res, 200, payload);
       if (this.scriptChangedOnDisk && this.bootScriptMtimeMs > 0) {
@@ -5634,6 +6336,19 @@ class AgyCockpitServer {
       return;
     }
 
+    if (req.method === 'POST' && pathname === '/api/debug-trace') {
+      const body = await this.readJsonBody(req);
+      if (this.isTraceEnabled()) {
+        for (const line of Array.isArray(body.lines) ? body.lines.slice(0, 500) : []) {
+          if (line && typeof line === 'object') {
+            this.debugTrace(Object.assign({}, line, { srvT: Date.now() }));
+          }
+        }
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
     if (req.method === 'POST' && pathname === '/api/conversation-seen') {
       const body = await this.readJsonBody(req);
       const convId = typeof body.conversationId === 'string' ? body.conversationId.trim().toLowerCase() : '';
@@ -5643,6 +6358,17 @@ class AgyCockpitServer {
       }
       const changed = this.markConversationSeen(convId, true);
       sendJson(res, 200, { ok: true, conversationId: convId, changed });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/conversation-unread') {
+      const body = await this.readJsonBody(req);
+      const targetId = body.conversationId || body.id || '';
+      const { status, body: outBody } = await this.setConversationUnread(
+        targetId,
+        body.unread !== false
+      );
+      sendJson(res, status, outBody);
       return;
     }
 
@@ -5680,7 +6406,7 @@ class AgyCockpitServer {
     ) {
       const body = await this.readJsonBody(req);
       const targetId = body.id || body.conversationId || '';
-      const { status, body: outBody } = this.setConversationCustomTitle(targetId, body.title);
+      const { status, body: outBody } = await this.setConversationCustomTitle(targetId, body.title);
       sendJson(res, status, outBody);
       return;
     }
@@ -5696,6 +6422,8 @@ class AgyCockpitServer {
       const entry = this.convCache.get(convId);
       if (entry) {
         entry.awaitingHandoffResponse = false;
+        entry.handoffRpcPendingMs = 0;
+        entry.lastHandoffStepIndex = -1;
         entry.needsFullHandoffRead = false;
         entry.handoffTargetStepIndex = -1;
       }
@@ -5725,9 +6453,8 @@ class AgyCockpitServer {
       } catch {}
       const isHandoffMessage = isSmartHandoffRequestText(message);
       const preTarget = this.convCache.get(cleanConvId);
-      const prevAwaitingHandoff = Boolean(preTarget && preTarget.awaitingHandoffResponse);
-      if (preTarget && isHandoffMessage && !prevAwaitingHandoff) {
-        preTarget.awaitingHandoffResponse = true;
+      if (preTarget && isHandoffMessage) {
+        preTarget.handoffRpcPendingMs = Date.now();
         this.markTranscriptDirty({ resetSummary: true, saveIndex: false });
       }
       const markSentSuccess = () => {
@@ -5736,8 +6463,8 @@ class AgyCockpitServer {
           const nowMs = Date.now();
           target.lastActiveIso = new Date(nowMs).toISOString();
           target.lastActiveMs = Math.max(target.lastActiveMs || 0, nowMs);
-          if (isHandoffMessage) {
-            target.awaitingHandoffResponse = true;
+          if (isHandoffMessage && !target.awaitingHandoffResponse) {
+            target.handoffRpcPendingMs = nowMs;
           }
           this.markTranscriptDirty({ resetSummary: true, saveIndex: false });
         }
@@ -5781,8 +6508,8 @@ class AgyCockpitServer {
       const out = await execAgentApi(['send-message', convId, message], effectiveProjectId, this.appDataDir, nativeWsPath);
       if (out && out.error) {
         const target = this.convCache.get(cleanConvId);
-        if (target && isHandoffMessage && !prevAwaitingHandoff) {
-          target.awaitingHandoffResponse = false;
+        if (target && isHandoffMessage) {
+          target.handoffRpcPendingMs = 0;
           this.markTranscriptDirty({ resetSummary: true, saveIndex: false });
         }
         sendJson(res, 502, out);
@@ -5800,7 +6527,7 @@ class AgyCockpitServer {
         sendJson(res, 400, { error: 'Empty message' });
         return;
       }
-      this.refreshProjectsRegistry(false);
+      this.refreshProjectsRegistry(true);
       const catalog = await this.getModelsCatalog(false);
       const isGeneral = Boolean(body.general);
       const srcConvId = typeof body.conversationId === 'string' ? body.conversationId.trim().toLowerCase() : '';
@@ -5810,7 +6537,7 @@ class AgyCockpitServer {
       const requestedProjectId =
         !isGeneral && typeof body.projectId === 'string' && UUID_RE.test(body.projectId.trim())
           ? body.projectId.trim().toLowerCase()
-          : '';
+          : (!isGeneral && srcEntry && srcEntry.projectId && UUID_RE.test(srcEntry.projectId) ? srcEntry.projectId : '');
       const requestedProj = requestedProjectId ? this.projectsRegistry.get(requestedProjectId) : null;
       const rawWsPath = isGeneral
         ? ''
@@ -5819,25 +6546,29 @@ class AgyCockpitServer {
            (srcEntry && srcEntry.workspacePath) ||
            '');
       const normWsPath = rawWsPath ? resolveCanonicalWorkspace(rawWsPath) : '';
-      const matchedProj = (normWsPath ? this.matchProjectForWorkspace(normWsPath) : null) || requestedProj || null;
+      const matchedProj = requestedProj || (normWsPath ? this.matchProjectForWorkspace(normWsPath) : null) || null;
       const effectiveProjectId = isGeneral
         ? ''
         : (requestedProjectId || (matchedProj ? matchedProj.id : ''));
       const effectiveWsPath = isGeneral
         ? ''
-        : (normWsPath || (matchedProj && matchedProj.primaryPath) || '');
+        : ((matchedProj && matchedProj.primaryPath) || normWsPath || '');
       const nativeWsPath =
         effectiveWsPath && process.platform === 'win32'
           ? effectiveWsPath.replace(/\//g, '\\')
           : effectiveWsPath;
 
-      const requestedModelRaw =
-        (typeof body.model === 'string' && body.model.trim()) ||
-        (typeof body.modelId === 'string' && body.modelId.trim()) ||
-        '';
-      let matchedModel = requestedModelRaw ? this.lookupModelByAny(requestedModelRaw) : null;
+      const rawModel = typeof body.model === 'string' ? body.model.trim() : '';
+      const rawModelId = typeof body.modelId === 'string' ? body.modelId.trim() : '';
+      const requestedModelRaw = rawModel || rawModelId || '';
+      let matchedModel =
+        (rawModel ? this.lookupModelByAny(rawModel) : null) ||
+        (rawModelId ? this.lookupModelByAny(rawModelId) : null) ||
+        null;
       let selectedModelEnum = matchedModel ? matchedModel.modelEnum : '';
-      if (!selectedModelEnum && requestedModelRaw.startsWith('MODEL_')) {
+      if (!selectedModelEnum && rawModel.startsWith('MODEL_')) {
+        selectedModelEnum = rawModel;
+      } else if (!selectedModelEnum && requestedModelRaw.startsWith('MODEL_')) {
         selectedModelEnum = requestedModelRaw;
       }
       if (!selectedModelEnum && srcEntry && srcEntry.modelEnum) {
@@ -5855,26 +6586,41 @@ class AgyCockpitServer {
       if (!matchedModel && selectedModelEnum) {
         matchedModel = this.lookupModelByAny(selectedModelEnum);
       }
-      const selectedModelId = (matchedModel && matchedModel.modelId) || requestedModelRaw || '';
+      const isAliasModel =
+        Boolean(matchedModel && matchedModel.isAlias) ||
+        selectedModelEnum.startsWith('MODEL_ALIAS_');
+      const selectedModelId = (matchedModel && matchedModel.modelId) || rawModelId || requestedModelRaw || '';
       const selectedModelLabel =
         (matchedModel && matchedModel.label) || this.lookupModelLabel(selectedModelEnum);
 
-      const seedNewConversation = (rawNewId) => {
+      const seedNewConversation = (rawNewId, boundProjectId = effectiveProjectId) => {
         const cleanNewId = (typeof rawNewId === 'string' ? rawNewId : '').trim().toLowerCase();
         if (!cleanNewId || !UUID_RE.test(cleanNewId)) return;
         this.deletedConvIds.delete(cleanNewId);
         const nowMs = Date.now();
-        if (isGeneral) {
+        const actualProjId = isGeneral ? '' : (boundProjectId || '');
+        const actualWsPath = isGeneral
+          ? ''
+          : (actualProjId || this.projectsRegistry.size === 0 ? effectiveWsPath : '');
+        if (!actualProjId && !actualWsPath) {
           this.metadataWorkspaceCache.set(cleanNewId, '__general__');
           this.saveMetadataCache();
-        } else if (effectiveWsPath) {
-          this.metadataWorkspaceCache.set(cleanNewId, effectiveWsPath);
+        } else {
+          this.metadataWorkspaceCache.set(cleanNewId, {
+            projectId: actualProjId,
+            workspacePath: actualWsPath
+          });
           this.saveMetadataCache();
         }
+        this.lsTrajectoryMeta.set(cleanNewId, {
+          projectId: actualProjId,
+          workspacePath: actualWsPath,
+          summary: '',
+          annotTitle: ''
+        });
         const preEntry = this.convCache.get(cleanNewId) || createEmptyEntry(cleanNewId);
-        if (effectiveWsPath && !preEntry.workspacePath) {
-          preEntry.workspacePath = effectiveWsPath;
-        }
+        preEntry.projectId = actualProjId;
+        preEntry.workspacePath = actualWsPath;
         if (selectedModelEnum) {
           preEntry.modelEnum = selectedModelEnum;
           preEntry.modelLabel = selectedModelLabel;
@@ -5898,7 +6644,7 @@ class AgyCockpitServer {
       const baseStartPayload = {
         source: 'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',
         trajectoryType: 'CORTEX_TRAJECTORY_TYPE_CASCADE',
-        ...(selectedModelEnum ? { requestedModel: selectedModelEnum } : {})
+        ...(selectedModelEnum && !isAliasModel ? { requestedModel: selectedModelEnum } : {})
       };
       const startPayload = { ...baseStartPayload };
       if (nativeWsPath) {
@@ -5913,17 +6659,31 @@ class AgyCockpitServer {
         };
       }
 
+      let boundProjectId = effectiveProjectId;
       let startRpc = await callLanguageServerRpc('StartCascade', startPayload, 8000);
-      if (startRpc.error && effectiveProjectId && nativeWsPath) {
-        const retryPayload = { ...baseStartPayload };
-        try {
-          retryPayload.workspaceUris = [pathToFileURL(nativeWsPath).href];
-        } catch {}
-        startRpc = await callLanguageServerRpc('StartCascade', retryPayload, 8000);
+      if (startRpc.error && effectiveProjectId && startPayload.workspaceUris) {
+        const retryProjOnly = {
+          ...baseStartPayload,
+          projectEnvConfig: startPayload.projectEnvConfig
+        };
+        startRpc = await callLanguageServerRpc('StartCascade', retryProjOnly, 8000);
       }
-      if (startRpc.error && selectedModelEnum) {
+      if (startRpc.error && effectiveProjectId) {
+        const retryWithoutProject = { ...baseStartPayload };
+        if (startPayload.workspaceUris) {
+          retryWithoutProject.workspaceUris = startPayload.workspaceUris;
+        }
+        startRpc = await callLanguageServerRpc('StartCascade', retryWithoutProject, 8000);
+        if (!startRpc.error) {
+          boundProjectId = '';
+        }
+      }
+      if (startRpc.error && baseStartPayload.requestedModel) {
         const retryWithoutModel = { ...startPayload };
         delete retryWithoutModel.requestedModel;
+        if (!boundProjectId && retryWithoutModel.projectEnvConfig) {
+          delete retryWithoutModel.projectEnvConfig;
+        }
         startRpc = await callLanguageServerRpc('StartCascade', retryWithoutModel, 8000);
       }
 
@@ -5933,7 +6693,7 @@ class AgyCockpitServer {
         '';
       const cascadeId = rawCascadeId.trim().toLowerCase();
       if (cascadeId && UUID_RE.test(cascadeId)) {
-        seedNewConversation(cascadeId);
+        seedNewConversation(cascadeId, boundProjectId);
         const sendPayload = {
           cascadeId,
           items: [{ text: message }],
@@ -5943,8 +6703,10 @@ class AgyCockpitServer {
         if (selectedModelEnum) {
           sendPayload.cascadeConfig = {
             plannerConfig: {
-              planModel: selectedModelEnum,
-              requestedModel: { model: selectedModelEnum }
+              ...(isAliasModel ? {} : { planModel: selectedModelEnum }),
+              requestedModel: isAliasModel
+                ? { alias: selectedModelEnum }
+                : { model: selectedModelEnum }
             }
           };
         }
@@ -5958,6 +6720,7 @@ class AgyCockpitServer {
           } catch {}
           if (!acceptedOnDisk) {
             this.convCache.delete(cascadeId);
+            this.lsTrajectoryMeta.delete(cascadeId);
             if (this.metadataWorkspaceCache.delete(cascadeId)) {
               this.saveMetadataCache();
             }
@@ -5969,10 +6732,12 @@ class AgyCockpitServer {
         }
         this.lastFullScanMs = 0;
         this.lastBrainDirMtimeMs = 0;
+        void this.syncTrajectoriesFromLanguageServer(true);
         sendJson(res, 200, {
           response: {
             conversationId: cascadeId,
             cascadeId,
+            projectId: boundProjectId,
             modelEnum: selectedModelEnum,
             modelLabel: selectedModelLabel
           }
@@ -5992,9 +6757,10 @@ class AgyCockpitServer {
       }
       const cliResp = (out && typeof out.response === 'object' && out.response) ? out.response : out;
       const cliConvId = (cliResp && (cliResp.conversationId || cliResp.cascadeId)) || '';
-      seedNewConversation(cliConvId);
+      seedNewConversation(cliConvId, effectiveProjectId);
       this.lastFullScanMs = 0;
       this.lastBrainDirMtimeMs = 0;
+      void this.syncTrajectoriesFromLanguageServer(true);
       sendJson(res, 200, out);
       return;
     }

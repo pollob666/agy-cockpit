@@ -1003,7 +1003,15 @@
       display: flex;
       flex-direction: column;
       gap: 5px;
+      cursor: pointer;
       transition: border-color 0.12s;
+    }
+
+    .conv-row .card-handoff-slot,
+    .conv-row .card-details-slot,
+    .conv-row .card-menu-wrap,
+    .conv-row .subagents-list {
+      cursor: default;
     }
 
     .conv-row.is-unread {
@@ -1266,9 +1274,12 @@
       border-color: var(--muted-foreground, #888888);
     }
 
+    .handoff-input:disabled,
     .handoff-input[readonly] {
-      opacity: 0.65;
-      cursor: default;
+      opacity: 0.55;
+      cursor: not-allowed;
+      user-select: none;
+      resize: none;
     }
 
     .handoff-model-bar {
@@ -1863,7 +1874,11 @@
         newChatText: '',
         newChatGeneral: false,
         newChatTargetKey: '',
-        newChatSending: false
+        newChatModelEnum: '',
+        newChatSending: false,
+        prevThinkingById: new Map(),
+        prevModelRespMsById: new Map(),
+        traceEnabled: false
       };
 
       const appShellEl = document.getElementById('app-shell');
@@ -2767,10 +2782,11 @@
         return groups;
       }
 
-      function resolveSelectedModelEntry(card) {
-        const hState = card ? getHandoffState(card.id) : null;
+      function resolveSelectedModelEntry(card, explicitModelEnum) {
+        const hState = card && explicitModelEnum === undefined ? getHandoffState(card.id) : null;
         const list = getEffectiveModelsForCard(card);
         const wantedEnum =
+          explicitModelEnum ||
           (hState && hState.selectedModelEnum) ||
           (card && card.modelEnum) ||
           state.defaultModelEnum ||
@@ -2792,13 +2808,29 @@
         return [catKey, state.defaultModelEnum || '', card.modelEnum || '', card.modelLabel || '', sel].join('|');
       }
 
-      function renderHandoffModelBarInner(card) {
+      function getNewChatModelSyncKey(card) {
+        const sel = state.newChatModelEnum || '';
+        const catKey = Array.isArray(state.availableModels)
+          ? state.availableModels.map((m) => m.modelEnum).join(',')
+          : '';
+        return [
+          catKey,
+          state.defaultModelEnum || '',
+          (card && card.modelEnum) || '',
+          (card && card.modelLabel) || '',
+          sel,
+          state.newChatSending ? 'sending' : 'idle'
+        ].join('|');
+      }
+
+      function renderModelBarControlsInner(card, convIdAttr, explicitModelEnum, isDisabled) {
         const groups = groupModelsByFamily(card);
-        const selected = resolveSelectedModelEntry(card);
+        const selected = resolveSelectedModelEntry(card, explicitModelEnum);
         if (groups.length === 0 || !selected) {
           return '<span class="handoff-model-label">Model: detecting available models...</span>';
         }
-        const idEsc = escapeHtml(card.id);
+        const idEsc = escapeHtml(convIdAttr);
+        const disabledAttr = isDisabled ? ' disabled' : '';
         const selectedGroup = groups.find((g) => g.family === selected.family) || groups[0];
         let familyOpts = '';
         for (const g of groups) {
@@ -2812,7 +2844,7 @@
         let html =
           '<div class="handoff-model-group">' +
             '<span class="handoff-model-label">Model</span>' +
-            '<select class="handoff-select handoff-family-select" data-conv-id="' + idEsc + '">' +
+            '<select class="handoff-select handoff-family-select" data-conv-id="' + idEsc + '"' + disabledAttr + '>' +
               familyOpts +
             '</select>' +
           '</div>';
@@ -2833,12 +2865,20 @@
           html +=
             '<div class="handoff-model-group">' +
               '<span class="handoff-model-label">Thinking</span>' +
-              '<select class="handoff-select handoff-tier-select" data-conv-id="' + idEsc + '">' +
+              '<select class="handoff-select handoff-tier-select" data-conv-id="' + idEsc + '"' + disabledAttr + '>' +
                 tierOpts +
               '</select>' +
             '</div>';
         }
         return html;
+      }
+
+      function renderHandoffModelBarInner(card) {
+        return renderModelBarControlsInner(card, card ? card.id : '', undefined, false);
+      }
+
+      function renderNewChatModelBarInner(card) {
+        return renderModelBarControlsInner(card, '__new_chat__', state.newChatModelEnum, Boolean(state.newChatSending));
       }
 
       function renderHandoffDrawer(card) {
@@ -2862,7 +2902,7 @@
               'Agent is generating AI handoff prompt...' +
             '</div>';
           placeholder = 'Waiting for AI handoff prompt...';
-          readonlyAttr = ' readonly';
+          readonlyAttr = ' disabled readonly aria-busy="true"';
           buttonsHtml =
             '<button class="btn-solid" disabled>Generating...</button>' +
             '<button class="ghost-btn" data-action="cancel-pending-handoff" data-id="' + idEsc + '">' +
@@ -2969,7 +3009,7 @@
         return html + '</div>';
       }
 
-      function renderActiveCardHeader(card) {
+      function renderActiveCardHeader(card, effectiveScope) {
         const tier = getCardTier(card);
         statusDotEl.className = 'dot ' + tier.dot;
 
@@ -3029,11 +3069,15 @@
 
         const isDetailsOpen = state.expandedDetails.has(card.id);
         const isHandoffOpen = state.openHandoffId === card.id;
+        const cardWsKey = card.workspaceKey || '__unscoped__';
+        const showPinnedUnread = Boolean(
+          effectiveScope && effectiveScope !== '__all__' && effectiveScope !== cardWsKey
+        );
 
         return (
           '<div class="conv-row-top" data-action="open-chat" data-id="' + escapeHtml(card.id) + '">' +
             '<div class="conv-title-wrap">' +
-              renderStatusBadge(card, false) +
+              renderStatusBadge(card, showPinnedUnread) +
               pinIconHtml +
               '<span class="conv-title">' + escapeHtml(titleText) + '</span>' +
             '</div>' +
@@ -3094,19 +3138,26 @@
         );
       }
 
-      function renderCardGearMenu(card) {
+      function renderCardGearMenu(card, isOtherChat) {
         const idEsc = escapeHtml(card.id);
         const displayTitle = card.customTitle || card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
         const defaultTitle = card.defaultTitle || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
         const titleEsc = escapeHtml(displayTitle);
         const defaultTitleEsc = escapeHtml(defaultTitle);
         const isPinned = Boolean(card.pinned);
+        const isUnread = Boolean(card.unread);
+        const canToggleUnread = Boolean(isOtherChat && !card.isThinking && !card.waitState);
         const isMenuOpen = state.openMenuConvId === card.id;
         return (
           '<div class="card-menu-wrap">' +
             '<button class="ghost-btn gear-btn" data-action="toggle-card-menu" data-id="' + idEsc + '" title="Conversation actions" aria-label="Conversation actions">⚙</button>' +
             (isMenuOpen
               ? '<div class="card-menu">' +
+                  (canToggleUnread
+                    ? '<button class="card-menu-item" data-action="toggle-unread-conv" data-id="' + idEsc + '" data-unread="' + (isUnread ? '1' : '0') + '">' +
+                        (isUnread ? 'Mark as read' : 'Mark as unread') +
+                      '</button>'
+                    : '') +
                   '<button class="card-menu-item" data-action="toggle-pin-conv" data-id="' + idEsc + '" data-pinned="' + (isPinned ? '1' : '0') + '">' +
                     (isPinned ? 'Unpin from top' : 'Pin to top') +
                   '</button>' +
@@ -3230,7 +3281,7 @@
               '<button class="ghost-btn" data-action="toggle-details" data-id="' + escapeHtml(card.id) + '">' +
                 (isDetailsOpen ? 'Hide' : 'History') +
               '</button>' +
-              renderCardGearMenu(card) +
+              renderCardGearMenu(card, true) +
             '</div>' +
           '</div>' +
           searchHitsHtml
@@ -3241,8 +3292,16 @@
         const el = document.createElement('div');
         el.className = className;
         el.setAttribute('data-conv-id', convId);
+        const isConvRow = className === 'conv-row';
+        if (isConvRow) {
+          el.setAttribute('data-action', 'open-chat');
+          el.setAttribute('data-id', convId);
+        }
+        const headerActionAttrs = isConvRow
+          ? ' data-action="open-chat" data-id="' + escapeHtml(convId) + '"'
+          : '';
         el.innerHTML =
-          '<div class="card-header-slot ' + headerClassName + '"></div>' +
+          '<div class="card-header-slot ' + headerClassName + '"' + headerActionAttrs + '></div>' +
           '<div class="card-handoff-slot card-slot" data-open="0"></div>' +
           '<div class="card-details-slot card-slot" data-rev="0"></div>';
         return el;
@@ -3272,8 +3331,12 @@
           handoffSlot.innerHTML = wantHandoff !== '0' ? renderHandoffDrawer(card) : '';
           if (wantHandoff !== '0') {
             const ta = handoffSlot.querySelector('textarea.handoff-input');
-            if (ta && hState) {
-              ta.value = hState.text;
+            if (ta) {
+              ta.disabled = isPending;
+              ta.readOnly = isPending;
+              if (hState) {
+                ta.value = hState.text;
+              }
             }
             restoreScrollPositions(handoffSlot);
           }
@@ -3364,9 +3427,15 @@
           isGeneral ? 'general' : 'project',
           state.newChatSending ? 'sending' : 'idle'
         ].join('|');
+        const nextModelSyncKey = getNewChatModelSyncKey(pinnedCard);
 
         const existingDrawer = newChatSlotEl.querySelector('.new-chat-drawer');
         if (existingDrawer && existingDrawer.getAttribute('data-scope-key') === scopeKey) {
+          const modelBar = existingDrawer.querySelector('.handoff-model-bar');
+          if (modelBar && modelBar.getAttribute('data-model-sync-key') !== nextModelSyncKey) {
+            modelBar.setAttribute('data-model-sync-key', nextModelSyncKey);
+            modelBar.innerHTML = renderNewChatModelBarInner(pinnedCard);
+          }
           return;
         }
 
@@ -3391,7 +3460,7 @@
             '<div class="new-chat-scope-row">' +
               '<div class="handoff-model-group" style="flex:1;min-width:0;">' +
                 '<span class="handoff-model-label">Project</span>' +
-                '<select class="handoff-select" id="new-chat-project-select" style="max-width:100%;flex:1;min-width:0;">' +
+                '<select class="handoff-select" id="new-chat-project-select" style="max-width:100%;flex:1;min-width:0;"' + (state.newChatSending ? ' disabled' : '') + '>' +
                   selectOptsHtml +
                 '</select>' +
               '</div>' +
@@ -3399,6 +3468,9 @@
             '<textarea class="new-chat-textarea" id="new-chat-textarea" rows="5" placeholder="Write a prompt to start a new conversation... (Ctrl+Enter to send)"' + (state.newChatSending ? ' readonly' : '') + '>' +
               escapeHtml(state.newChatText) +
             '</textarea>' +
+            '<div class="handoff-model-bar" data-model-sync-key="' + escapeHtml(nextModelSyncKey) + '">' +
+              renderNewChatModelBarInner(pinnedCard) +
+            '</div>' +
             '<div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;">' +
               '<button class="ghost-btn" data-action="toggle-new-chat"' + (state.newChatSending ? ' disabled' : '') + '>Cancel</button>' +
               '<button class="btn-solid" data-action="submit-new-chat"' + (state.newChatSending ? ' disabled' : '') + '>' +
@@ -3421,6 +3493,7 @@
         const thinkingByWs = new Map();
         const waitPermByWs = new Map();
         const waitQuestionByWs = new Map();
+        const isActiveIframe = isThisIframeActiveConv();
         for (const c of allMain) {
           const k = c.workspaceKey || '__unscoped__';
           if (c.waitState === 'permission') waitPermByWs.set(k, true);
@@ -3428,7 +3501,9 @@
           else if (c.isThinking) thinkingByWs.set(k, true);
           if (c.id !== pinnedId) {
             countsByWs.set(k, (countsByWs.get(k) || 0) + 1);
-            if (c.unread) unreadByWs.set(k, true);
+          }
+          if (c.unread && !(c.id === pinnedId && effectiveScope === k && isActiveIframe)) {
+            unreadByWs.set(k, true);
           }
         }
 
@@ -3501,6 +3576,54 @@
         return Math.max(Number(card.lastViewMs) || 0, Number(card.lastUserInputMs) || 0);
       }
 
+      // Opt-in unread/claim tracing, active only while the server reports traceEnabled (see
+      // "Unread / Blue Dot Debugging" in AGENTS.md). inst tells the per-chat aux pane iframes apart.
+      const uiTraceBuf = [];
+      let uiTraceLastSig = '';
+      const uiTraceInstance = Math.random().toString(36).slice(2, 7);
+      function uiTrace(ev, extra) {
+        if (!state.traceEnabled) return;
+        uiTraceBuf.push(Object.assign({ src: 'ui', inst: uiTraceInstance, t: Date.now(), ev }, extra || {}));
+      }
+      function uiTraceSnapshot(effectiveScope) {
+        if (!state.traceEnabled) return;
+        let claimed = '';
+        try { claimed = (localStorage.getItem(ACTIVE_CONV_STORAGE_KEY) || '').slice(0, 8); } catch {}
+        const tabs = [...workspacePillsEl.querySelectorAll('[data-ws]')].map((b) =>
+          b.getAttribute('data-ws').slice(-14) +
+          (b.querySelector('.thinking-dots') ? ':dots' : '') +
+          (b.querySelector('.unread-dot') ? ':BLUE' : '')
+        );
+        const snap = {
+          initialHost: initialHostConvId.slice(0, 8),
+          host: (state.hostConvId || '').slice(0, 8),
+          manualPin: (state.manualPinId || '').slice(0, 8),
+          pinned: (state.lastPinnedId || '').slice(0, 8),
+          sel: state.selectedWorkspaceKey.slice(-14),
+          scope: String(effectiveScope || '').slice(-14),
+          activeWs: (state.activeWorkspaceKey || '').slice(-14),
+          claimed,
+          focus: document.hasFocus(),
+          hidden: isIframeHidden(),
+          active: isThisIframeActiveConv(),
+          tabs
+        };
+        const sig = JSON.stringify(snap);
+        if (sig !== uiTraceLastSig) {
+          uiTraceLastSig = sig;
+          uiTrace('render', snap);
+        }
+      }
+      setInterval(() => {
+        if (uiTraceBuf.length === 0) return;
+        const lines = uiTraceBuf.splice(0, uiTraceBuf.length);
+        void apiFetch('/api/debug-trace', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lines })
+        }).catch(() => {});
+      }, 1000);
+
       function pickMostRecentFocusCard(cards) {
         let best = null;
         let bestFocusMs = -1;
@@ -3557,8 +3680,11 @@
           } else if (hostCard && newestWsCard && newestWsCard.id !== hostCard.id) {
             const newestTs = getCardFocusMs(newestWsCard);
             const hostTs = getCardFocusMs(hostCard);
+            // On every chat switch Antigravity stamps the same last_user_view_time on both the left and the
+            // entered chat, so the chat the user just left gets a lastViewMs newer than this manual pin.
+            // Only a newer user prompt elsewhere may override an explicit pin.
             const newActivityAfterManualPin =
-              !state.manualPinId || newestTs > state.manualPinTs;
+              !state.manualPinId || (Number(newestWsCard.lastUserInputMs) || 0) > state.manualPinTs;
 
             if (newestTs > hostTs && newActivityAfterManualPin) {
               pinnedCard = newestWsCard;
@@ -3583,6 +3709,31 @@
         }
         state.lastPinnedId = pinnedId;
 
+        const effectiveScope = resolveEffectiveWorkspaceScope(pinnedCard);
+        maybeTakeOverActiveClaim();
+        if (pinnedCard) {
+          const wasThinking = Boolean(state.prevThinkingById.get(pinnedCard.id));
+          const prevRespMs = state.prevModelRespMsById.get(pinnedCard.id);
+          const curRespMs = Number(pinnedCard.lastModelResponseMs) || 0;
+          const justCompletedReply =
+            !pinnedCard.isThinking &&
+            !pinnedCard.waitState &&
+            (wasThinking || (prevRespMs !== undefined && curRespMs > prevRespMs));
+          // The claim gate (isThisIframeActiveConv) is what keeps hidden aux pane iframes from clearing
+          // the dot of their own chat; see the unread model notes above ACTIVE_CONV_STORAGE_KEY.
+          if (pinnedCard.unread && justCompletedReply && isThisIframeActiveConv()) {
+            markConversationSeenInServer(pinnedCard.id);
+          }
+        }
+        const nextThinkingById = new Map();
+        const nextModelRespMsById = new Map();
+        for (const c of mainChats) {
+          nextThinkingById.set(c.id, Boolean(c.isThinking || c.waitState));
+          nextModelRespMsById.set(c.id, Number(c.lastModelResponseMs) || 0);
+        }
+        state.prevThinkingById = nextThinkingById;
+        state.prevModelRespMsById = nextModelRespMsById;
+
         if (pinnedCard) {
           let activeCardEl = pinnedContainer.querySelector('.active-card');
           if (!activeCardEl || activeCardEl.getAttribute('data-conv-id') !== pinnedCard.id) {
@@ -3590,7 +3741,7 @@
             activeCardEl = createCardShell('active-card', 'active-card-header', pinnedCard.id);
             pinnedContainer.appendChild(activeCardEl);
           }
-          syncCardDom(activeCardEl, pinnedCard, renderActiveCardHeader(pinnedCard));
+          syncCardDom(activeCardEl, pinnedCard, renderActiveCardHeader(pinnedCard, effectiveScope));
           activeWsIndicator.textContent = pinnedCard.workspaceName ? '· ' + pinnedCard.workspaceName : '';
         } else {
           statusDotEl.className = 'dot dot-fresh';
@@ -3604,9 +3755,9 @@
           activeWsIndicator.textContent = '';
         }
 
-        const effectiveScope = resolveEffectiveWorkspaceScope(pinnedCard);
         renderNewChatDrawer(effectiveScope, pinnedCard);
         renderWorkspacePills(effectiveScope, pinnedId);
+        uiTraceSnapshot(effectiveScope);
         renderDiagnosticsSticky();
         renderQuotaPill(pinnedCard);
         refreshQuotaModal();
@@ -3867,8 +4018,16 @@
           if (force) params.set('force', '1');
           if (urlSimulateDiag) params.set('simulateDiag', urlSimulateDiag);
           if (state.hostConvId) params.set('activeConvId', state.hostConvId);
-          if (isThisIframeActiveConv() && (state.lastPinnedId || state.hostConvId)) {
-            params.set('viewedConvId', state.lastPinnedId || state.hostConvId);
+          const candidateViewId = state.lastPinnedId || state.hostConvId;
+          const candidateViewCard = candidateViewId
+            ? state.conversations.find((c) => c.id === candidateViewId)
+            : null;
+          if (
+            isThisIframeActiveConv() &&
+            candidateViewId &&
+            (!candidateViewCard || (!candidateViewCard.isThinking && !candidateViewCard.waitState && !candidateViewCard.unread))
+          ) {
+            params.set('viewedConvId', candidateViewId);
           }
           if (state.workspaceUris.length > 0) {
             params.set('workspaceUris', JSON.stringify(state.workspaceUris));
@@ -3888,6 +4047,7 @@
             }
             state.uiMtimeMs = data.uiMtimeMs;
           }
+          state.traceEnabled = Boolean(data.traceEnabled);
           if (data.unchanged && !force && !queryChanged && !urlSimulateDiag) return;
 
           state.version = data.version || state.version;
@@ -4049,7 +4209,7 @@
 
       async function checkPendingSmartHandoff() {
         const pending = state.pendingSmartHandoff;
-        if (!pending || pending.completing) return;
+        if (!pending || !pending.sent || pending.completing) return;
 
         if (Date.now() - pending.requestedAtMs > 180000) {
           cancelPendingSmartHandoff(false);
@@ -4058,12 +4218,12 @@
         }
 
         const conv = state.conversations.find((c) => c.id === pending.convId);
-        if (!conv) return;
+        if (!conv || conv.awaitingHandoffResponse) return;
 
+        const handoffMs = Number(conv.latestHandoffMs) || 0;
         const hasNewHandoff =
           Boolean(conv.latestHandoffPrompt) &&
-          (conv.latestHandoffMs > pending.baselineHandoffMs ||
-            conv.latestHandoffPrompt !== pending.baselinePromptText);
+          handoffMs > pending.baselineHandoffMs;
 
         if (!hasNewHandoff) return;
 
@@ -4074,7 +4234,7 @@
         hState.cancelledPending = false;
         hState.text = finalPrompt;
         hState.step = 'ready';
-        hState.loadedHandoffMs = Math.max(Number(conv.latestHandoffMs) || 0, (pending.baselineHandoffMs || 0) + 1);
+        hState.loadedHandoffMs = Math.max(handoffMs, hState.dismissedHandoffMs || 0, (pending.baselineHandoffMs || 0) + 1);
         state.scrollPositions.set(convId + ':handoff', 0);
         state.pendingSmartHandoff = null;
 
@@ -4083,31 +4243,43 @@
       }
 
       async function handleSmartHandoffRun(convId) {
+        if (state.pendingSmartHandoff && state.pendingSmartHandoff.convId === convId) {
+          return;
+        }
         const card = state.conversations.find((c) => c.id === convId);
         const hState = getHandoffState(convId);
         const focus = readCurrentHandoffText(convId).trim();
         state.openHandoffId = convId;
 
+        const initialBaselineMs = (card && Number(card.latestHandoffMs)) || 0;
+        hState.cancelledPending = false;
+        state.pendingSmartHandoff = {
+          convId,
+          baselineHandoffMs: initialBaselineMs,
+          baselinePromptText: (card && card.latestHandoffPrompt) || '',
+          requestedAtMs: Date.now(),
+          sent: false,
+          completing: false
+        };
+        renderAll();
+
         try {
           const { data } = await fetchHandoffData(convId, focus);
+          if (!state.pendingSmartHandoff || state.pendingSmartHandoff.convId !== convId) {
+            return;
+          }
 
           if (window.sidecar && window.sidecar.agent && typeof window.sidecar.agent.sendMessage === 'function') {
             const baselineHandoffMs = Math.max(
+              initialBaselineMs,
               (card && Number(card.latestHandoffMs)) || 0,
-              Number(data.latestHandoffMs) || 0,
-              hState.loadedHandoffMs || 0,
-              hState.dismissedHandoffMs || 0
+              Number(data.latestHandoffMs) || 0
             );
-            hState.cancelledPending = false;
-            hState.loadedHandoffMs = baselineHandoffMs;
-            state.pendingSmartHandoff = {
-              convId,
-              baselineHandoffMs,
-              baselinePromptText: data.latestHandoffPrompt || (card && card.latestHandoffPrompt) || '',
-              requestedAtMs: Date.now(),
-              completing: false
-            };
-            renderAll();
+            state.pendingSmartHandoff.baselineHandoffMs = baselineHandoffMs;
+            state.pendingSmartHandoff.baselinePromptText =
+              data.latestHandoffPrompt || (card && card.latestHandoffPrompt) || '';
+            state.pendingSmartHandoff.sent = true;
+            hState.loadedHandoffMs = Math.max(hState.loadedHandoffMs || 0, baselineHandoffMs);
 
             try {
               const res = await window.sidecar.agent.sendMessage(data.promptForAgentHandoff, convId);
@@ -4129,10 +4301,14 @@
             }
           }
 
+          state.pendingSmartHandoff = null;
+          renderAll();
           await copyTextToClipboard(data.promptForAgentHandoff || '');
           showToast('Copied handoff request to clipboard');
         } catch (err) {
-          cancelPendingSmartHandoff(false);
+          if (state.pendingSmartHandoff && state.pendingSmartHandoff.convId === convId) {
+            cancelPendingSmartHandoff(false);
+          }
           showToast('Error starting smart handoff: ' + err.message);
         }
       }
@@ -4242,11 +4418,15 @@
         const hasProjectTarget = Boolean(targetWs && (targetWs.projectId || targetWs.path));
         const isGeneral = state.newChatTargetKey === '__unscoped__' || !hasProjectTarget || Boolean(state.newChatGeneral);
 
+        const selectedModel = resolveSelectedModelEntry(pinnedCard, state.newChatModelEnum);
         const preferredModelEnum =
+          (selectedModel && selectedModel.modelEnum) ||
+          state.newChatModelEnum ||
           (pinnedCard && pinnedCard.modelEnum) ||
           state.defaultModelEnum ||
           (state.availableModels[0] && state.availableModels[0].modelEnum) ||
           '';
+        const preferredModelId = (selectedModel && selectedModel.modelId) || '';
 
         renderNewChatDrawer(effectiveScope, pinnedCard);
 
@@ -4258,13 +4438,15 @@
               conversationId: (pinnedCard && pinnedCard.id) || state.hostConvId || '',
               projectId: isGeneral ? '' : ((targetWs && targetWs.projectId) || ''),
               workspacePath: isGeneral ? '' : ((targetWs && targetWs.path) || ''),
-              model: preferredModelEnum
+              model: preferredModelEnum,
+              modelId: preferredModelId
             },
             () => {
               state.newChatSending = false;
               state.newChatOpen = false;
               state.newChatText = '';
               state.newChatTargetKey = '';
+              state.newChatModelEnum = '';
               state.newChatGeneral = false;
             }
           );
@@ -4288,6 +4470,7 @@
 
       function markConversationSeenInServer(convId) {
         if (!convId) return;
+        uiTrace('markSeenInServer', { id: convId.slice(0, 8), caller: (new Error().stack || '').split('\n')[2] || '' });
         const card = state.conversations.find((c) => c.id === convId);
         if (card) {
           card.unread = false;
@@ -4382,6 +4565,34 @@
           }
           await fetchStatus(true);
           showToast(nextPinned ? 'Pinned conversation to top' : 'Unpinned conversation');
+        } catch (err) {
+          await fetchStatus(true);
+          showToast('Error: ' + err.message);
+        }
+      }
+
+      async function handleSetConversationUnread(convId, nextUnread) {
+        if (!convId) return;
+        const wantUnread = Boolean(nextUnread);
+        uiTrace('setUnread', { id: convId.slice(0, 8), unread: wantUnread });
+        state.openMenuConvId = null;
+        const card = state.conversations.find((c) => c.id === convId);
+        if (card) {
+          card.unread = wantUnread;
+        }
+        renderAll();
+        try {
+          const res = await apiFetch('/api/conversation-unread', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conversationId: convId, unread: wantUnread })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) {
+            throw new Error(data.error || 'Failed to update unread state');
+          }
+          await fetchStatus(true);
+          showToast(wantUnread ? 'Marked conversation as unread' : 'Marked conversation as read');
         } catch (err) {
           await fetchStatus(true);
           showToast('Error: ' + err.message);
@@ -4495,6 +4706,7 @@
           sectionOtherEl.classList.remove('collapsed');
         }
         renderAll();
+        ensureModelsLoaded(state.lastPinnedId || state.hostConvId, false);
         const nextTa = document.getElementById('new-chat-textarea');
         if (nextTa) {
           nextTa.focus();
@@ -4705,8 +4917,33 @@
         }
       });
 
+      const CARD_NON_CHAT_ZONE_SELECTOR =
+        '.card-handoff-slot, .card-details-slot, .card-menu-wrap, .subagents-list';
+      let pointerDownTarget = null;
+      let pointerDownInCardSubzone = false;
+
       document.addEventListener('click', async (e) => {
-        if (ctxMenuEl && ctxMenuEl.style.display !== 'none' && !e.target.closest('#ctx-menu')) {
+        let clickTarget = e.target;
+        if (pointerDownTarget && !pointerDownTarget.isConnected && typeof e.clientX === 'number') {
+          const downActionEl = pointerDownTarget.closest ? pointerDownTarget.closest('[data-action]') : null;
+          const pointEl = document.elementFromPoint(e.clientX, e.clientY);
+          const upActionEl = pointEl && pointEl.closest ? pointEl.closest('[data-action]') : null;
+          if (
+            downActionEl &&
+            upActionEl &&
+            downActionEl.getAttribute('data-action') === upActionEl.getAttribute('data-action') &&
+            downActionEl.getAttribute('data-id') === upActionEl.getAttribute('data-id')
+          ) {
+            clickTarget = upActionEl;
+          }
+        }
+        const inCardSubzone =
+          pointerDownInCardSubzone ||
+          Boolean(clickTarget && clickTarget.closest && clickTarget.closest(CARD_NON_CHAT_ZONE_SELECTOR));
+        pointerDownTarget = null;
+        pointerDownInCardSubzone = false;
+
+        if (ctxMenuEl && ctxMenuEl.style.display !== 'none' && !clickTarget.closest('#ctx-menu')) {
           closeProjectContextMenu();
         }
 
@@ -4715,12 +4952,14 @@
           return;
         }
 
-        if (state.openMenuConvId && !e.target.closest('.card-menu-wrap')) {
+        const wsBtn = clickTarget.closest('[data-ws]');
+        const actionBtn = clickTarget.closest('[data-action]');
+
+        if (state.openMenuConvId && !clickTarget.closest('.card-menu-wrap')) {
           state.openMenuConvId = null;
           renderAll();
         }
 
-        const wsBtn = e.target.closest('[data-ws]');
         if (wsBtn) {
           const nextWs = wsBtn.getAttribute('data-ws');
           state.selectedWorkspaceKey = nextWs;
@@ -4733,12 +4972,30 @@
               state.newChatGeneral = false;
             }
           }
+          const pinnedId = state.lastPinnedId || state.hostConvId;
+          const pinnedCard = pinnedId
+            ? state.conversations.find((c) => c.id === pinnedId)
+            : null;
+          if (
+            pinnedCard &&
+            pinnedCard.unread &&
+            !pinnedCard.isThinking &&
+            !pinnedCard.waitState &&
+            (nextWs === '__all__' || nextWs === (pinnedCard.workspaceKey || '__unscoped__'))
+          ) {
+            markConversationSeenInServer(pinnedCard.id);
+          }
           renderAll();
           return;
         }
 
-        const actionBtn = e.target.closest('[data-action]');
         if (!actionBtn) return;
+        if (
+          inCardSubzone &&
+          (actionBtn.classList.contains('conv-row') || actionBtn.classList.contains('conv-row-header'))
+        ) {
+          return;
+        }
         const action = actionBtn.getAttribute('data-action');
         const convId = actionBtn.getAttribute('data-id');
 
@@ -4815,6 +5072,11 @@
           renderAll();
           return;
         }
+        if (action === 'toggle-unread-conv' && convId) {
+          const nextUnread = actionBtn.getAttribute('data-unread') !== '1';
+          handleSetConversationUnread(convId, nextUnread);
+          return;
+        }
         if (action === 'toggle-pin-conv' && convId) {
           const nextPinned = actionBtn.getAttribute('data-pinned') !== '1';
           handlePinConversation(convId, nextPinned);
@@ -4867,6 +5129,7 @@
           state.newChatOpen = !state.newChatOpen;
           if (!state.newChatOpen) {
             state.newChatTargetKey = '';
+            state.newChatModelEnum = '';
             state.newChatGeneral = false;
           } else {
             const pinnedCard = state.conversations.find((c) => c.id === state.lastPinnedId) || null;
@@ -4887,6 +5150,7 @@
           }
           renderAll();
           if (state.newChatOpen) {
+            ensureModelsLoaded(state.lastPinnedId || state.hostConvId, false);
             const nextTa = document.getElementById('new-chat-textarea');
             if (nextTa) nextTa.focus();
           }
@@ -4992,25 +5256,38 @@
         }
         const convId = target.getAttribute('data-conv-id');
         if (!convId) return;
-        const card = state.conversations.find((c) => c.id === convId);
-        const hState = getHandoffState(convId);
+        const isNewChat = convId === '__new_chat__';
+        const card = isNewChat
+          ? (state.conversations.find((c) => c.id === state.lastPinnedId) || null)
+          : state.conversations.find((c) => c.id === convId);
+        const hState = isNewChat ? null : getHandoffState(convId);
 
         if (target.classList.contains('handoff-family-select')) {
           const chosenFamily = target.value;
           const groups = groupModelsByFamily(card);
           const grp = groups.find((g) => g.family === chosenFamily);
           if (grp && grp.models.length > 0) {
-            const prevSelected = resolveSelectedModelEntry(card);
+            const prevSelected = isNewChat
+              ? resolveSelectedModelEntry(card, state.newChatModelEnum)
+              : resolveSelectedModelEntry(card);
             const prevTier = (prevSelected && prevSelected.tier) ? prevSelected.tier.toLowerCase() : '';
             const sameTier = prevTier
               ? grp.models.find((m) => (m.tier || '').toLowerCase() === prevTier)
               : null;
             const nextModel = sameTier || grp.models[0];
-            hState.selectedModelEnum = nextModel.modelEnum;
+            if (isNewChat) {
+              state.newChatModelEnum = nextModel.modelEnum;
+            } else if (hState) {
+              hState.selectedModelEnum = nextModel.modelEnum;
+            }
             renderAll();
           }
         } else if (target.classList.contains('handoff-tier-select')) {
-          hState.selectedModelEnum = target.value;
+          if (isNewChat) {
+            state.newChatModelEnum = target.value;
+          } else if (hState) {
+            hState.selectedModelEnum = target.value;
+          }
           renderAll();
         }
       });
@@ -5022,6 +5299,9 @@
         }
         if (e.target && e.target.hasAttribute('data-focus-conv')) {
           const convId = e.target.getAttribute('data-focus-conv');
+          if (state.pendingSmartHandoff && state.pendingSmartHandoff.convId === convId) {
+            return;
+          }
           const hState = getHandoffState(convId);
           hState.text = e.target.value;
           if (hState.step === 'ready' && e.target.value.trim() === '') {
@@ -5069,6 +5349,7 @@
             e.preventDefault();
             state.newChatOpen = false;
             state.newChatTargetKey = '';
+            state.newChatModelEnum = '';
             renderAll();
           } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
@@ -5077,13 +5358,17 @@
           return;
         }
         if (e.target && e.target.classList && e.target.classList.contains('handoff-input')) {
+          const convId = e.target.getAttribute('data-focus-conv');
+          if (state.pendingSmartHandoff && state.pendingSmartHandoff.convId === convId) {
+            e.preventDefault();
+            return;
+          }
           if (e.key === 'Escape') {
             e.preventDefault();
             state.openHandoffId = null;
             renderAll();
           } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
-            const convId = e.target.getAttribute('data-focus-conv');
             if (convId) {
               const hState = getHandoffState(convId);
               if (hState.step === 'ready') {
@@ -5139,7 +5424,30 @@
         showToast('Refreshed');
       });
 
+      // Unread / "is the user looking at this chat" model. Every fact below was verified with a live
+      // trace; re-read this before touching claims, markConversationSeenInServer or viewedConvId.
+      //
+      // 1. The aux pane keeps one Cockpit iframe alive per opened chat. Off-screen iframes keep polling,
+      //    report document.hidden === false with a non-zero size, and document.hasFocus() is false in
+      //    every iframe while the user types in the chat panel. Visibility APIs therefore cannot tell
+      //    which iframe is on screen; the shared localStorage claim (ACTIVE_CONV_STORAGE_KEY) is the only
+      //    signal, and only the claim holder may auto-mark its chat as seen (justCompletedReply in
+      //    renderAll, viewedConvId in fetchStatus). Any new auto-seen path must be gated on the claim,
+      //    otherwise a hidden iframe silently clears the blue dot of the chat it belongs to.
+      // 2. On a chat switch Antigravity writes the SAME last_user_view_time into BOTH .pbtxt files (the
+      //    left and the entered chat), and it bumps it again while the user interacts with the open chat.
+      //    lastViewMs means "the user was around this chat at T", never "this chat is open now", and
+      //    max(lastViewMs) is a tie right after every switch. Claiming from lastViewMs alone made the
+      //    hidden iframe of the left chat steal the claim back, so its reply was marked seen and no dot
+      //    appeared (race: it only worked when the pointer happened to cross the new Cockpit iframe).
+      // 3. A Cockpit click claims the target explicitly BEFORE toggleConversation; the Antigravity stamp
+      //    lands ~60 ms later. A native switch (sidebar) claims nothing, so its stamp is newer than the
+      //    claim by far more than CLAIM_SWITCH_GRACE_MS. That ordering is what maybeTakeOverActiveClaim
+      //    relies on. Pointer events can only reach the on-screen iframe, so they may claim freely.
+      // 4. Aux pane iframes must not claim on boot: a plugin update reloads every live iframe at once and
+      //    the last one to finish booting would win.
       const ACTIVE_CONV_STORAGE_KEY = '__agy_cockpit_active_conv_id__';
+      const ACTIVE_CONV_TS_STORAGE_KEY = '__agy_cockpit_active_conv_ts__';
 
       function isIframeCollapsed() {
         return Boolean(window.innerWidth === 0 && window.innerHeight === 0);
@@ -5187,6 +5495,7 @@
         if (state.newChatOpen && !state.newChatSending) {
           state.newChatOpen = false;
           state.newChatTargetKey = '';
+          state.newChatModelEnum = '';
           state.newChatGeneral = false;
           needRender = true;
         }
@@ -5197,13 +5506,58 @@
 
       function isThisIframeActiveConv() {
         if (isIframeHidden()) return false;
-        if (document.hasFocus()) return true;
         const myId = (state.lastPinnedId || state.hostConvId || '').trim().toLowerCase();
+        if (!myId) return false;
+        const myCard = state.conversations.find((c) => c.id === myId);
+        if (myCard) {
+          const effectiveScope = resolveEffectiveWorkspaceScope(myCard);
+          const myWsKey = myCard.workspaceKey || '__unscoped__';
+          if (effectiveScope !== '__all__' && effectiveScope !== myWsKey) {
+            return false;
+          }
+        }
+        if (document.hasFocus()) return true;
+        let claimedId = '';
         try {
-          const claimedId = (localStorage.getItem(ACTIVE_CONV_STORAGE_KEY) || '').trim().toLowerCase();
-          if (claimedId && myId && claimedId !== myId) return false;
+          claimedId = (localStorage.getItem(ACTIVE_CONV_STORAGE_KEY) || '').trim().toLowerCase();
         } catch {}
-        return true;
+        return !claimedId || claimedId === myId;
+      }
+
+      function readActiveClaim() {
+        try {
+          return {
+            id: (localStorage.getItem(ACTIVE_CONV_STORAGE_KEY) || '').trim().toLowerCase(),
+            ts: Number(localStorage.getItem(ACTIVE_CONV_TS_STORAGE_KEY)) || 0
+          };
+        } catch {
+          return { id: '', ts: 0 };
+        }
+      }
+
+      // A Cockpit click claims the target before the switch, therefore only a view stamp clearly newer
+      // than the current claim (a native switch) or a new prompt typed in this chat moves the claim here.
+      // See the unread model notes above ACTIVE_CONV_STORAGE_KEY.
+      const CLAIM_SWITCH_GRACE_MS = 2000;
+      function maybeTakeOverActiveClaim() {
+        if (!initialHostConvId || isIframeHidden()) return;
+        const myCard = state.conversations.find((c) => c.id === initialHostConvId);
+        if (!myCard) return;
+        const claim = readActiveClaim();
+        if (claim.id === initialHostConvId) return;
+        const myViewMs = Number(myCard.lastViewMs) || 0;
+        let enteredHere = myViewMs > claim.ts + CLAIM_SWITCH_GRACE_MS;
+        if (enteredHere) {
+          for (const c of state.conversations) {
+            if (!c.isSubagent && c.id !== myCard.id && (Number(c.lastViewMs) || 0) > myViewMs) {
+              enteredHere = false;
+              break;
+            }
+          }
+        }
+        if (enteredHere || (Number(myCard.lastUserInputMs) || 0) > claim.ts) {
+          claimActiveConversation(initialHostConvId);
+        }
       }
 
       function claimActiveConversation(explicitConvId) {
@@ -5211,8 +5565,13 @@
         const activeId = (explicitConvId || state.lastPinnedId || state.hostConvId || '').trim().toLowerCase();
         if (!activeId) return;
         try {
-          if (localStorage.getItem(ACTIVE_CONV_STORAGE_KEY) !== activeId) {
+          const changed = localStorage.getItem(ACTIVE_CONV_STORAGE_KEY) !== activeId;
+          if (changed) {
+            uiTrace('claim', { id: activeId.slice(0, 8), explicit: Boolean(explicitConvId), caller: (new Error().stack || '').split('\n')[2] || '' });
             localStorage.setItem(ACTIVE_CONV_STORAGE_KEY, activeId);
+          }
+          if (changed || explicitConvId) {
+            localStorage.setItem(ACTIVE_CONV_TS_STORAGE_KEY, String(Date.now()));
           }
         } catch {}
       }
@@ -5274,7 +5633,21 @@
         }
       });
 
-      document.addEventListener('pointerdown', () => {
+      document.addEventListener('pointerdown', (e) => {
+        pointerDownTarget = e.target || null;
+        pointerDownInCardSubzone = Boolean(
+          e.target && e.target.closest && e.target.closest(CARD_NON_CHAT_ZONE_SELECTOR)
+        );
+        if (!isIframeHidden()) {
+          claimActiveConversation();
+        }
+      });
+
+      let lastPointerClaimMs = 0;
+      document.addEventListener('pointermove', () => {
+        const now = Date.now();
+        if (now - lastPointerClaimMs < 1200) return;
+        lastPointerClaimMs = now;
         if (!isIframeHidden()) {
           claimActiveConversation();
         }
@@ -5300,7 +5673,7 @@
           } catch {}
         }
         await fetchStatus(true);
-        if (!isIframeHidden()) {
+        if (!isIframeHidden() && !initialHostConvId) {
           claimActiveConversation(state.lastPinnedId || state.hostConvId);
         }
         void ensureModelsLoaded(state.hostConvId, false);

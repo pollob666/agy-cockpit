@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>AGY Cockpit unread harness</title></head>
+<body>
+<div id="frames"></div>
+<script>
+// Parent page of the unread harness. It plays the Antigravity host: it creates one Cockpit iframe per
+// opened chat (like the aux pane), moves the iframes of other chats off-screen without hiding them,
+// stamps last_user_view_time on BOTH chats of every switch, and serves a fake /api/status that applies
+// the same blue dot rule as server.cjs buildConversationCard. run.cjs fills in the placeholders.
+(function () {
+  const SCENARIO = '__SCENARIO__';
+  const CHILD = '__CHILD__';
+  const T0 = Date.now();
+  const A = 'aaaaaaaa-0000-4000-8000-00000000000a';
+  const A2 = 'aaaaaaaa-0000-4000-8000-0000000000a2';
+  const B = 'bbbbbbbb-0000-4000-8000-00000000000b';
+  const B2 = 'bbbbbbbb-0000-4000-8000-0000000000b2';
+  const NAMES = { [A]: 'A', [A2]: 'A2', [B]: 'B', [B2]: 'B2' };
+  const name = (id) => NAMES[String(id || '').toLowerCase()] || '-';
+  const nameByPrefix = (prefix) => {
+    const full = Object.keys(NAMES).find((k) => prefix && k.startsWith(String(prefix).toLowerCase()));
+    return full ? NAMES[full] : '-';
+  };
+  const log = [];
+  const snapshots = [];
+  let version = 0;
+  const rel = () => Date.now() - T0;
+
+  function mk(id, ws, over) {
+    return Object.assign({
+      id, isSubagent: false, subagents: [], subagentTokens: 0,
+      projectId: '', workspaceKey: ws, workspaceName: ws, workspacePath: 'd:/dev/' + ws,
+      title: 'Conv ' + name(id), customTitle: '', defaultTitle: 'Conv ' + name(id),
+      firstPrompt: 'first', lastPrompt: 'last', lastModelResponse: 'reply', lastModelResponseMs: 0,
+      lastUserInputMs: 0, lastViewMs: 0, lastSeenMs: 0, markedAsUnread: false,
+      isThinking: false, waitState: '', waitToolName: '',
+      pollution: { id: 'fresh', label: 'Fresh', color: '#10b981' },
+      promptCount: 3, verbatimPrompts: 3, compactedPrompts: 0, compactCount: 0, lastCompactMs: 0,
+      promptsSinceLastCompact: 3, currentTokens: 1000, totalTokens: 1000, totalInputTokens: 0,
+      totalCacheReadTokens: 0, totalOutputTokens: 0, observedCeiling: 0, ceilingExceeded: false,
+      contextRatio: null, pinned: false, pinnedAtMs: 0, latestHandoffMs: 0, latestHandoffPrompt: '',
+      modelEnum: '', modelLabel: '', git: { hasGit: false, commitsBehind: 0 }
+    }, over);
+  }
+
+  const startOn = SCENARIO === 'native_enter' ? B : A;
+  const convs = {
+    [A]: mk(A, 'antigravity', {
+      lastUserInputMs: T0 - 3000, lastViewMs: startOn === A ? T0 - 3000 : T0 - 60000,
+      lastSeenMs: T0 - 60000, lastModelResponseMs: T0 - 70000, isThinking: true
+    }),
+    [A2]: mk(A2, 'antigravity', {
+      lastUserInputMs: T0 - 3700000, lastViewMs: T0 - 3600000, lastSeenMs: T0 - 3600000, lastModelResponseMs: T0 - 3650000
+    }),
+    [B]: mk(B, 'mezura', {
+      lastUserInputMs: T0 - 7300000, lastViewMs: startOn === B ? T0 - 3000 : T0 - 7200000,
+      lastSeenMs: T0 - 7200000, lastModelResponseMs: T0 - 7250000
+    }),
+    [B2]: mk(B2, 'mezura', {
+      lastUserInputMs: T0 - 9300000, lastViewMs: T0 - 9200000, lastSeenMs: T0 - 9200000, lastModelResponseMs: T0 - 9250000
+    })
+  };
+
+  function card(c) {
+    const baseline = Math.max(c.lastSeenMs, c.lastViewMs, c.lastUserInputMs);
+    const unread = Boolean(!c.isThinking && !c.waitState && (c.lastModelResponseMs > baseline || c.markedAsUnread));
+    const lastActiveMs = Math.max(c.lastUserInputMs, c.lastModelResponseMs, c.isThinking ? Date.now() : 0);
+    return Object.assign({}, c, { unread, lastActiveMs, lastActiveIso: new Date(lastActiveMs).toISOString() });
+  }
+  function markSeen(id, bump) {
+    const c = convs[id];
+    if (!c) return;
+    if (bump) c.lastViewMs = Math.max(c.lastViewMs, Date.now());
+    c.lastSeenMs = Math.max(c.lastSeenMs, c.lastViewMs, c.lastUserInputMs, c.lastModelResponseMs);
+    c.markedAsUnread = false;
+  }
+  const respond = (data) => ({ ok: true, status: 200, json: async () => data, text: async () => JSON.stringify(data) });
+
+  const frames = {};
+  let ideOpenId = '';
+  function ensureFrame(id) {
+    if (frames[id]) return;
+    const f = document.createElement('iframe');
+    f.src = CHILD + '?conversationId=' + id;
+    f.style.cssText = 'width:480px;height:800px;border:0;position:absolute;top:0;left:-6000px';
+    document.getElementById('frames').appendChild(f);
+    frames[id] = f;
+  }
+  function showChat(id) {
+    ensureFrame(id);
+    for (const [k, f] of Object.entries(frames)) {
+      f.style.left = k === id ? '0px' : '-6000px';
+    }
+    const prev = ideOpenId;
+    ideOpenId = id;
+    if (prev && prev !== id) {
+      // Real Antigravity: identical last_user_view_time on both chats of the switch.
+      const now = Date.now();
+      convs[prev].lastViewMs = now;
+      convs[id].lastViewMs = now;
+      log.push(['view stamp on both', name(prev) + '+' + name(id), rel()]);
+    }
+  }
+
+  window.__mock = {
+    wsOf: (cid) => (convs[cid] ? convs[cid].workspaceKey : 'antigravity'),
+    cockpitToggle(id, fromCid) {
+      log.push(['cockpit toggle', name(id), 'from iframe ' + name(fromCid), rel()]);
+      showChat(id);
+    },
+    async fetch(url, opts, cid) {
+      const u = new URL(url, 'http://x');
+      if (u.pathname === '/api/status') {
+        const viewed = (u.searchParams.get('viewedConvId') || '').toLowerCase();
+        if (convs[viewed] && !convs[viewed].markedAsUnread && !convs[viewed].isThinking) {
+          const mine = Math.max(convs[viewed].lastViewMs, convs[viewed].lastUserInputMs);
+          const newer = Object.values(convs).some((o) => o.id !== viewed && Math.max(o.lastViewMs, o.lastUserInputMs) > mine);
+          if (!newer) {
+            const before = convs[viewed].lastSeenMs;
+            markSeen(viewed, false);
+            if (convs[viewed].lastSeenMs !== before) log.push(['server viewed-seen', name(viewed), 'by iframe ' + name(cid), rel()]);
+          }
+        }
+        version += 1;
+        const cards = Object.values(convs).map(card).sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+        return respond({
+          version,
+          traceEnabled: true,
+          activeWorkspaceKey: convs[cid] ? convs[cid].workspaceKey : 'antigravity',
+          workspaces: [
+            { key: 'antigravity', name: 'antigravity', path: 'd:/dev/antigravity', projectId: '' },
+            { key: 'mezura', name: 'mezura', path: 'd:/dev/mezura', projectId: '' }
+          ],
+          archivedProjects: [], archivedConversations: [], conversations: cards
+        });
+      }
+      if (u.pathname === '/api/conversation-seen') {
+        const body = JSON.parse((opts && opts.body) || '{}');
+        markSeen(body.conversationId, true);
+        log.push(['POST conversation-seen', name(body.conversationId), 'by iframe ' + name(cid), rel()]);
+        return respond({ ok: true });
+      }
+      if (u.pathname === '/api/conversation-unread') {
+        const body = JSON.parse((opts && opts.body) || '{}');
+        const c = convs[body.conversationId];
+        const nextUnread = body.unread !== false;
+        if (c) {
+          if (nextUnread) {
+            c.markedAsUnread = true;
+          } else {
+            markSeen(body.conversationId, true);
+          }
+        }
+        log.push(['POST conversation-unread', name(body.conversationId), String(nextUnread), 'by iframe ' + name(cid), rel()]);
+        return respond({ ok: true, conversationId: body.conversationId, unread: nextUnread });
+      }
+      if (u.pathname === '/api/debug-trace') {
+        const body = JSON.parse((opts && opts.body) || '{}');
+        for (const l of body.lines || []) {
+          if (l.ev === 'claim' || l.ev === 'markSeenInServer') {
+            const line = String(l.caller || '').match(/:(\d+):\d+\)?\s*$/);
+            log.push(['ui ' + l.ev, nameByPrefix(l.id), 'iframe ' + name(cid), line ? 'ui.html:' + line[1] : '', l.t - T0]);
+          }
+        }
+        return respond({ ok: true });
+      }
+      if (u.pathname === '/api/models') return respond({ models: [] });
+      return respond({ ok: true });
+    }
+  };
+
+  function snap(label) {
+    let claimed = '';
+    try { claimed = localStorage.getItem('__agy_cockpit_active_conv_id__') || ''; } catch {}
+    const out = { label, t: rel(), ideOpen: name(ideOpenId), claimed: name(claimed), serverAUnread: card(convs[A]).unread, frames: {} };
+    for (const [id, f] of Object.entries(frames)) {
+      const d = f.contentDocument;
+      if (!d) continue;
+      const tabs = {};
+      for (const t of d.querySelectorAll('[data-ws]')) {
+        tabs[t.getAttribute('data-ws')] = {
+          active: t.classList.contains('active'),
+          dots: Boolean(t.querySelector('.thinking-dots')),
+          blue: Boolean(t.querySelector('.unread-dot'))
+        };
+      }
+      const pinnedEl = d.querySelector('#pinned-container .active-card');
+      out.frames[name(id)] = {
+        visible: f.style.left === '0px',
+        pinned: pinnedEl ? name(pinnedEl.getAttribute('data-conv-id')) : '-',
+        tabs,
+        rows: [...d.querySelectorAll('#cards-container .conv-row')].map((e) =>
+          name(e.getAttribute('data-conv-id')) + (e.classList.contains('is-unread') ? '*' : '')
+        )
+      };
+    }
+    snapshots.push(out);
+  }
+  function clickIn(id, selector, label) {
+    const d = frames[id] && frames[id].contentDocument;
+    const el = d && d.querySelector(selector);
+    if (el) el.click();
+    log.push([label, el ? 'ok' : 'NOT FOUND', rel()]);
+  }
+  function complete(id) {
+    convs[id].isThinking = false;
+    convs[id].lastModelResponseMs = Date.now();
+    log.push([name(id) + ' completed', rel()]);
+  }
+  function interaction(id) {
+    convs[id].lastViewMs = Date.now();
+    log.push(['view stamp (interaction)', name(id), rel()]);
+  }
+  const cardSel = (id) => '#cards-container .conv-row[data-id="' + id + '"]';
+
+  try { localStorage.clear(); } catch {}
+  showChat(startOn);
+
+  const plan = [];
+  if (SCENARIO === 'cockpit_switch' || SCENARIO === 'cockpit_switch_interact' || SCENARIO === 'cockpit_return') {
+    plan.push([3000, () => clickIn(A, '[data-ws="mezura"]', 'click tab mezura in iframe A')]);
+    plan.push([3300, () => clickIn(A, cardSel(B), 'click card B in iframe A')]);
+    if (SCENARIO === 'cockpit_switch_interact') plan.push([10000, () => interaction(B)]);
+    plan.push([12000, () => snap('working')]);
+    plan.push([14000, () => complete(A)]);
+    plan.push([21000, () => snap('final')]);
+    if (SCENARIO === 'cockpit_return') {
+      plan.push([22000, () => clickIn(B, '[data-ws="antigravity"]', 'click tab antigravity in iframe B')]);
+      plan.push([22400, () => snap('returning')]);
+      plan.push([22600, () => clickIn(B, cardSel(A), 'click card A in iframe B')]);
+      plan.push([27000, () => snap('returned')]);
+    }
+  } else if (SCENARIO === 'stay') {
+    plan.push([5000, () => snap('working')]);
+    plan.push([8000, () => complete(A)]);
+    plan.push([15000, () => snap('final')]);
+  } else if (SCENARIO === 'native_leave') {
+    plan.push([4000, () => { log.push(['native switch to B', rel()]); showChat(B); }]);
+    plan.push([10000, () => snap('working')]);
+    plan.push([12000, () => complete(A)]);
+    plan.push([19000, () => snap('final')]);
+  } else if (SCENARIO === 'native_enter') {
+    plan.push([300, () => ensureFrame(A)]);
+    plan.push([7000, () => { log.push(['native switch to A', rel()]); showChat(A); }]);
+    plan.push([10000, () => snap('working')]);
+    plan.push([13000, () => complete(A)]);
+    plan.push([20000, () => snap('final')]);
+  } else if (SCENARIO === 'manual_unread') {
+    plan.push([3000, () => complete(A)]);
+    plan.push([6000, () => clickIn(A, '[data-action="toggle-card-menu"][data-id="' + A2 + '"]', 'open gear menu on A2')]);
+    plan.push([6300, () => clickIn(A, '[data-action="toggle-unread-conv"][data-id="' + A2 + '"]', 'click Mark as unread on A2')]);
+    plan.push([12000, () => snap('marked')]);
+    plan.push([13000, () => clickIn(A, '[data-action="toggle-card-menu"][data-id="' + A2 + '"]', 'open gear menu on A2 again')]);
+    plan.push([13300, () => clickIn(A, '[data-action="toggle-unread-conv"][data-id="' + A2 + '"]', 'click Mark as read on A2')]);
+    plan.push([18000, () => snap('cleared')]);
+  } else {
+    log.push(['unknown scenario ' + SCENARIO, 0]);
+  }
+  let endAt = 0;
+  for (const [at, fn] of plan) {
+    setTimeout(fn, at);
+    endAt = Math.max(endAt, at);
+  }
+  setTimeout(() => {
+    const pre = document.createElement('pre');
+    pre.id = 'harness-result';
+    pre.textContent = JSON.stringify({ scenario: SCENARIO, snapshots, log });
+    document.body.appendChild(pre);
+  }, endAt + 500);
+})();
+</script>
+</body></html>
