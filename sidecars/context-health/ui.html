@@ -1122,10 +1122,149 @@
     .btn-danger:hover {
       background: #ef4444;
     }
+
+    .shell.has-diag-bar {
+      padding-bottom: 58px;
+    }
+
+    .diag-sticky {
+      position: fixed;
+      bottom: 10px;
+      left: 12px;
+      right: 12px;
+      z-index: 9000;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      pointer-events: none;
+    }
+
+    .diag-drawer {
+      pointer-events: auto;
+      background: rgba(20, 20, 20, 0.97);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(251, 146, 60, 0.38);
+      border-radius: 9px;
+      padding: 11px 12px;
+      max-height: 52vh;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
+    }
+
+    .diag-drawer.is-fail {
+      border-color: rgba(248, 113, 113, 0.45);
+    }
+
+    .diag-drawer-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--foreground, #ededed);
+    }
+
+    .diag-issue-card {
+      background: var(--background, #0a0a0a);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.09));
+      border-radius: 6px;
+      padding: 8px 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 12px;
+      line-height: 1.42;
+    }
+
+    .diag-issue-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .diag-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .diag-badge.fail {
+      background: rgba(239, 68, 68, 0.2);
+      color: #f87171;
+    }
+
+    .diag-badge.warn {
+      background: rgba(245, 158, 11, 0.2);
+      color: #fbbf24;
+    }
+
+    .diag-symbol {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      color: var(--muted-foreground, #888888);
+    }
+
+    .diag-bar {
+      pointer-events: auto;
+      background: rgba(22, 22, 22, 0.96);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(251, 146, 60, 0.42);
+      border-radius: 8px;
+      padding: 7px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    }
+
+    .diag-bar.is-fail {
+      border-color: rgba(248, 113, 113, 0.5);
+    }
+
+    .diag-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+      flex: 1;
+      cursor: pointer;
+    }
+
+    .diag-bar-title {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: #fbbf24;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .diag-bar.is-fail .diag-bar-title {
+      color: #f87171;
+    }
+
+    .diag-bar-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
   </style>
 </head>
 <body>
-  <div class="shell">
+  <div class="shell" id="app-shell">
     <div class="top-section">
       <div class="topbar">
         <div class="brand">
@@ -1166,6 +1305,7 @@
     </div>
   </div>
 
+  <div class="diag-sticky" id="diag-sticky" style="display:none;"></div>
   <div class="modal-backdrop" id="modal-backdrop"></div>
   <div class="toast" id="toast"></div>
 
@@ -1195,6 +1335,12 @@
         }
       });
 
+      const urlSimulateDiag = (new URLSearchParams(window.location.search).get('simulateDiag') || '').trim();
+      let initialDismissedDiagSig = '';
+      try {
+        initialDismissedDiagSig = sessionStorage.getItem('__ch_dismissed_diag_sig__') || '';
+      } catch {}
+
       const state = {
         version: 0,
         uiMtimeMs: 0,
@@ -1219,6 +1365,10 @@
         defaultModelEnum: '',
         activeWorkspaceKey: '',
         searchMatches: null,
+        diagnostics: null,
+        diagExpanded: false,
+        diagRechecking: false,
+        dismissedDiagSig: initialDismissedDiagSig,
         expandedDetails: new Map(),
         expandedPromptKeys: new Set(),
         openHandoffId: null,
@@ -1231,6 +1381,8 @@
         newChatSending: false
       };
 
+      const appShellEl = document.getElementById('app-shell');
+      const diagStickyEl = document.getElementById('diag-sticky');
       const pinnedContainer = document.getElementById('pinned-container');
       const cardsContainer = document.getElementById('cards-container');
       const workspacePillsEl = document.getElementById('workspace-pills');
@@ -2204,6 +2356,7 @@
         const effectiveScope = resolveEffectiveWorkspaceScope(pinnedCard);
         renderNewChatDrawer(effectiveScope, pinnedCard);
         renderWorkspacePills(effectiveScope, pinnedId);
+        renderDiagnosticsSticky();
 
         const q = state.searchQuery.trim().toLowerCase();
         const filtered = state.conversations.filter((c) => {
@@ -2285,6 +2438,155 @@
         }
       }
 
+      function renderDiagnosticsSticky() {
+        if (!diagStickyEl) return;
+        const diag = state.diagnostics;
+        const issues = diag && Array.isArray(diag.issues) ? diag.issues : [];
+        const sig = (diag && diag.signature) || 'ok';
+        const hasIssues = Boolean(diag && diag.status !== 'ok' && issues.length > 0 && sig !== state.dismissedDiagSig);
+
+        if (!hasIssues) {
+          if (diagStickyEl.style.display !== 'none') {
+            diagStickyEl.style.display = 'none';
+            diagStickyEl.innerHTML = '';
+            diagStickyEl.removeAttribute('data-render-key');
+          }
+          if (appShellEl) appShellEl.classList.remove('has-diag-bar');
+          return;
+        }
+
+        const isFail = diag.status === 'fail' || (diag.failCount || 0) > 0;
+        const renderKey = [
+          sig,
+          state.diagExpanded ? 'open' : 'closed',
+          state.diagRechecking ? 'rechecking' : 'idle'
+        ].join('|');
+
+        if (diagStickyEl.style.display === 'none') {
+          diagStickyEl.style.display = 'flex';
+        }
+        if (appShellEl) appShellEl.classList.add('has-diag-bar');
+        if (diagStickyEl.getAttribute('data-render-key') === renderKey) {
+          return;
+        }
+        diagStickyEl.setAttribute('data-render-key', renderKey);
+
+        const firstIssue = issues[0];
+        const shortLabel =
+          (diag.agyUpdated ? 'AGY Update: ' : 'AGY API Issue: ') +
+          issues.length +
+          (issues.length === 1 ? ' contract (' + firstIssue.id + ')' : ' contracts');
+
+        let drawerHtml = '';
+        if (state.diagExpanded) {
+          let cardsHtml = '';
+          for (const item of issues) {
+            const bClass = item.status === 'fail' ? 'fail' : 'warn';
+            cardsHtml +=
+              '<div class="diag-issue-card">' +
+                '<div class="diag-issue-top">' +
+                  '<div style="display:flex;align-items:center;gap:6px;">' +
+                    '<span class="diag-badge ' + bClass + '">' + escapeHtml(item.status) + '</span>' +
+                    '<strong style="font-size:12.5px;color:var(--foreground,#ededed);">' + escapeHtml(item.title || item.id) + '</strong>' +
+                  '</div>' +
+                  '<span class="diag-symbol">' + escapeHtml(item.codeSymbol || '') + '</span>' +
+                '</div>' +
+                '<div style="color:var(--foreground,#e2e2e2);">' + escapeHtml(item.detail || '') + '</div>' +
+                (item.fixHint
+                  ? '<div class="muted" style="font-size:11.5px;">Fix: ' + escapeHtml(item.fixHint) + '</div>'
+                  : '') +
+              '</div>';
+          }
+          drawerHtml =
+            '<div class="diag-drawer' + (isFail ? ' is-fail' : '') + '">' +
+              '<div class="diag-drawer-head">' +
+                '<span>Antigravity Contract Verifier (' + issues.length + ')</span>' +
+                '<div style="display:flex;align-items:center;gap:5px;">' +
+                  '<button class="ghost-btn" data-action="diag-recheck"' + (state.diagRechecking ? ' disabled' : '') + '>' +
+                    (state.diagRechecking ? 'Checking...' : 'Re-run Doctor') +
+                  '</button>' +
+                  '<button class="btn-solid" style="padding:3px 9px;font-size:12px;" data-action="diag-copy">Copy Fix Prompt</button>' +
+                '</div>' +
+              '</div>' +
+              cardsHtml +
+            '</div>';
+        }
+
+        const barHtml =
+          '<div class="diag-bar' + (isFail ? ' is-fail' : '') + '">' +
+            '<div class="diag-bar-left" data-action="diag-toggle" title="Click to inspect broken or changed AGY contracts">' +
+              '<span class="dot-sm ' + (isFail ? 'dot-polluted' : 'dot-heavy') + '"></span>' +
+              '<span class="diag-bar-title">' + escapeHtml(shortLabel) + '</span>' +
+            '</div>' +
+            '<div class="diag-bar-actions">' +
+              '<button class="ghost-btn" style="padding:2px 7px;font-size:12px;" data-action="diag-toggle">' +
+                (state.diagExpanded ? 'Hide' : 'Details') +
+              '</button>' +
+              '<button class="ghost-btn" style="padding:2px 7px;font-size:12px;" data-action="diag-copy" title="Copy diagnostic fix prompt for agent">Copy Fix</button>' +
+              '<button class="ghost-btn" style="padding:2px 6px;font-size:13px;" data-action="diag-dismiss" title="Dismiss warning for this session">×</button>' +
+            '</div>' +
+          '</div>';
+
+        diagStickyEl.innerHTML = drawerHtml + barHtml;
+      }
+
+      async function handleRecheckDiagnostics() {
+        if (state.diagRechecking) return;
+        state.diagRechecking = true;
+        renderDiagnosticsSticky();
+        try {
+          const qs = new URLSearchParams({ refresh: '1' });
+          if (urlSimulateDiag) qs.set('simulate', urlSimulateDiag);
+          const res = await apiFetch('/api/diagnostics?' + qs.toString());
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const report = await res.json();
+          const issues = Array.isArray(report.contracts)
+            ? report.contracts.filter((c) => c.status !== 'pass')
+            : [];
+          state.diagnostics = {
+            status: report.status || 'ok',
+            issueCount: issues.length,
+            failCount: report.failCount || 0,
+            warnCount: report.warnCount || 0,
+            signature: report.signature || 'ok',
+            checkedAtMs: report.checkedAtMs || Date.now(),
+            agyUpdated: Boolean(report.agyUpdated),
+            issues
+          };
+          if (issues.length === 0) {
+            state.diagExpanded = false;
+            showToast('All AGY contracts healthy!');
+          } else {
+            showToast('Doctor found ' + issues.length + ' contract issue(s)');
+          }
+        } catch (err) {
+          showToast('Doctor check failed: ' + err.message);
+        } finally {
+          state.diagRechecking = false;
+          renderDiagnosticsSticky();
+        }
+      }
+
+      async function handleCopyDiagnosticsFixPrompt() {
+        const diag = state.diagnostics;
+        const issues = diag && Array.isArray(diag.issues) ? diag.issues : [];
+        if (issues.length === 0) return;
+        const lines = [
+          'Context Health Contract Verifier detected Antigravity (AGY) API/schema drift:',
+          ''
+        ];
+        for (const item of issues) {
+          lines.push(`- [${String(item.status || '').toUpperCase()}] ${item.id} (${item.title})`);
+          if (item.codeSymbol) lines.push(`  Target: ${item.codeSymbol}`);
+          if (item.detail) lines.push(`  Detail: ${item.detail}`);
+          if (item.fixHint) lines.push(`  Fix Hint: ${item.fixHint}`);
+        }
+        lines.push('');
+        lines.push('Run `node setup.cjs --doctor` (and `/agy-api-audit` if needed) and fix the affected contracts in d:\\dev\\tools\\antigravity.');
+        await copyTextToClipboard(lines.join('\n'));
+        showToast('Copied AGY contract fix prompt');
+      }
+
       async function fetchStatus(force = false) {
         if (!force && state.pollInFlight) return;
         state.pollInFlight = true;
@@ -2292,10 +2594,11 @@
           const currentQuery = state.searchQuery.trim();
           const queryChanged = currentQuery !== state.lastFetchedQuery;
           const params = new URLSearchParams();
-          if (!force && !queryChanged && state.version > 0) {
+          if (!force && !queryChanged && state.version > 0 && !urlSimulateDiag) {
             params.set('sinceVersion', String(state.version));
           }
           if (force) params.set('force', '1');
+          if (urlSimulateDiag) params.set('simulateDiag', urlSimulateDiag);
           if (state.hostConvId) params.set('activeConvId', state.hostConvId);
           if (isThisIframeActiveConv() && (state.lastPinnedId || state.hostConvId)) {
             params.set('viewedConvId', state.lastPinnedId || state.hostConvId);
@@ -2317,7 +2620,7 @@
             }
             state.uiMtimeMs = data.uiMtimeMs;
           }
-          if (data.unchanged && !force && !queryChanged) return;
+          if (data.unchanged && !force && !queryChanged && !urlSimulateDiag) return;
 
           state.version = data.version || state.version;
           state.lastFetchedQuery = currentQuery;
@@ -2333,6 +2636,9 @@
           }
           if (data.defaultModelEnum) {
             state.defaultModelEnum = data.defaultModelEnum;
+          }
+          if (data.diagnostics) {
+            state.diagnostics = data.diagnostics;
           }
           state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
           state.searchMatches = data.searchMatches || null;
@@ -2944,6 +3250,31 @@
 
         if (action === 'close-modal') {
           closeModal();
+          return;
+        }
+        if (action === 'diag-toggle') {
+          state.diagExpanded = !state.diagExpanded;
+          renderDiagnosticsSticky();
+          return;
+        }
+        if (action === 'diag-recheck') {
+          handleRecheckDiagnostics();
+          return;
+        }
+        if (action === 'diag-copy') {
+          handleCopyDiagnosticsFixPrompt();
+          return;
+        }
+        if (action === 'diag-dismiss') {
+          const sig = (state.diagnostics && state.diagnostics.signature) || '';
+          if (sig) {
+            state.dismissedDiagSig = sig;
+            state.diagExpanded = false;
+            try {
+              sessionStorage.setItem('__ch_dismissed_diag_sig__', sig);
+            } catch {}
+            renderDiagnosticsSticky();
+          }
           return;
         }
         if (action === 'open-archived-modal') {
