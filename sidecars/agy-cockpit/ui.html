@@ -119,6 +119,151 @@
       background: var(--secondary, rgba(255, 255, 255, 0.04));
     }
 
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+
+    .quota-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: transparent;
+      color: var(--muted-foreground, #888888);
+      border: 1px solid transparent;
+      border-radius: 5px;
+      padding: 3px 6px;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      cursor: pointer;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+    }
+
+    .quota-pill:hover {
+      color: var(--foreground, #ededed);
+      border-color: var(--border, rgba(255, 255, 255, 0.09));
+      background: var(--secondary, rgba(255, 255, 255, 0.04));
+    }
+
+    .quota-ring {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+      transform: rotate(-90deg);
+    }
+
+    .quota-ring circle {
+      fill: none;
+      stroke-width: 2.2;
+    }
+
+    .quota-ring .quota-ring-track {
+      stroke: var(--border, rgba(255, 255, 255, 0.14));
+    }
+
+    .modal-card.quota-modal-card {
+      max-width: 380px;
+    }
+
+    .quota-groups {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 60vh;
+      overflow-y: auto;
+    }
+
+    .quota-group {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      padding: 9px 10px;
+      background: var(--background, #0a0a0a);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+      border-radius: 6px;
+    }
+
+    .quota-group.is-active {
+      border-color: var(--border, rgba(255, 255, 255, 0.22));
+    }
+
+    .quota-group-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .quota-group-name {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--foreground, #ededed);
+    }
+
+    .quota-group-badge {
+      font-size: 10.5px;
+      font-weight: 500;
+      color: var(--muted-foreground, #999999);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+      border-radius: 999px;
+      padding: 0 6px;
+      white-space: nowrap;
+    }
+
+    .quota-group-pct {
+      font-size: 12.5px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
+    }
+
+    .quota-bucket {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .quota-bucket-row,
+    .quota-bucket-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .quota-bucket-row {
+      font-size: 12px;
+      color: var(--foreground, #ededed);
+    }
+
+    .quota-bucket-meta {
+      font-size: 11px;
+      color: var(--muted-foreground, #777777);
+    }
+
+    .quota-bar {
+      height: 5px;
+      border-radius: 999px;
+      background: var(--secondary, rgba(255, 255, 255, 0.08));
+      overflow: hidden;
+    }
+
+    .quota-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+    }
+
+    .quota-footnote {
+      font-size: 11px;
+      color: var(--muted-foreground, #777777);
+    }
+
     .active-card {
       background: var(--card, #141414);
       border: 1px solid var(--border, rgba(255, 255, 255, 0.09));
@@ -1361,7 +1506,10 @@
           <span class="brand-title">AGY Cockpit</span>
           <span class="brand-ws" id="active-workspace-indicator"></span>
         </div>
-        <button class="ghost-btn" id="btn-refresh" title="Refresh">Refresh</button>
+        <div class="topbar-actions">
+          <button class="quota-pill" id="quota-pill" data-action="open-quota-modal" style="display:none;"></button>
+          <button class="ghost-btn" id="btn-refresh" title="Refresh">Refresh</button>
+        </div>
       </div>
 
       <div id="pinned-container"></div>
@@ -1453,6 +1601,9 @@
         archivedConversations: [],
         availableModels: [],
         defaultModelEnum: '',
+        quota: null,
+        quotaActiveKey: '',
+        quotaModalTimer: null,
         activeWorkspaceKey: '',
         searchMatches: null,
         diagnostics: null,
@@ -1488,6 +1639,7 @@
       const sectionOtherEl = document.getElementById('section-other');
       const statusDotEl = document.getElementById('status-dot');
       const btnRefresh = document.getElementById('btn-refresh');
+      const quotaPillEl = document.getElementById('quota-pill');
       const modalBackdropEl = document.getElementById('modal-backdrop');
       const toastEl = document.getElementById('toast');
 
@@ -1595,6 +1747,225 @@
       function getCardTier(card) {
         const id = (card && card.pollution && card.pollution.id) || 'fresh';
         return TIER_UI[id] || TIER_UI.fresh;
+      }
+
+      const QUOTA_FAMILY_PATTERNS = [
+        { key: 'claude', re: /claude|anthropic|opus|sonnet|haiku/i },
+        { key: 'gemini', re: /gemini|google/i },
+        { key: 'openai', re: /openai|\bgpt|codex/i }
+      ];
+
+      function getQuotaColor(usedPct) {
+        const pct = Number(usedPct) || 0;
+        if (pct >= 90) return TIER_UI.polluted.color;
+        if (pct >= 75) return TIER_UI.heavy.color;
+        if (pct >= 50) return TIER_UI.warm.color;
+        return TIER_UI.fresh.color;
+      }
+
+      function formatQuotaPct(pct) {
+        return Math.round(Math.min(100, Math.max(0, Number(pct) || 0))) + '%';
+      }
+
+      function resolveCardQuotaFamily(card) {
+        if (!card) return '';
+        const model = card.modelEnum
+          ? state.availableModels.find((m) => m.modelEnum === card.modelEnum)
+          : null;
+        const text = [card.modelLabel, model && model.label, model && model.modelId, card.modelEnum]
+          .filter(Boolean)
+          .join(' ');
+        const hit = text ? QUOTA_FAMILY_PATTERNS.find((p) => p.re.test(text)) : null;
+        return hit ? hit.key : '';
+      }
+
+      function resolveActiveQuota(pinnedCard) {
+        const groups = state.quota ? state.quota.groups.filter((g) => g.maxUsedPct !== null) : [];
+        if (groups.length === 0) return null;
+        const family = resolveCardQuotaFamily(pinnedCard);
+        const match = family
+          ? groups.find((g) => g.family === family || (Array.isArray(g.families) && g.families.includes(family)))
+          : null;
+        if (match) return { group: match, pct: match.maxUsedPct, matched: true };
+        const top = groups.reduce((a, b) => (b.maxUsedPct > a.maxUsedPct ? b : a));
+        return { group: top, pct: top.maxUsedPct, matched: false };
+      }
+
+      function renderQuotaPill(pinnedCard) {
+        if (!quotaPillEl) return;
+        const active = resolveActiveQuota(pinnedCard);
+        if (!active) {
+          state.quotaActiveKey = '';
+          if (quotaPillEl.style.display !== 'none') {
+            quotaPillEl.style.display = 'none';
+            quotaPillEl.innerHTML = '';
+          }
+          return;
+        }
+        state.quotaActiveKey = active.matched ? active.group.key : '';
+        const color = getQuotaColor(active.pct);
+        const radius = 5.4;
+        const circumference = 2 * Math.PI * radius;
+        const filled = (Math.min(100, Math.max(0, active.pct)) / 100) * circumference;
+        const html =
+          '<svg class="quota-ring" viewBox="0 0 14 14" aria-hidden="true">' +
+            '<circle class="quota-ring-track" cx="7" cy="7" r="' + radius + '"></circle>' +
+            '<circle cx="7" cy="7" r="' + radius + '" stroke="' + color + '" stroke-linecap="round"' +
+              ' stroke-dasharray="' + filled.toFixed(2) + ' ' + circumference.toFixed(2) + '"></circle>' +
+          '</svg>' +
+          '<span>' + formatQuotaPct(active.pct) + '</span>';
+        if (quotaPillEl.innerHTML !== html) {
+          quotaPillEl.innerHTML = html;
+        }
+        const bucketSummary = active.group.buckets
+          .filter((b) => !b.disabled && b.usedPct !== null)
+          .map((b) => b.windowLabel + ' ' + formatQuotaPct(b.usedPct) + ' used')
+          .join(', ');
+        const title = (active.matched ? '' : 'Highest usage · ') + active.group.label + ': ' + bucketSummary + ' · click for all models';
+        if (quotaPillEl.title !== title) {
+          quotaPillEl.title = title;
+          quotaPillEl.setAttribute('aria-label', 'Model usage limits: ' + title);
+        }
+        if (quotaPillEl.style.display === 'none') {
+          quotaPillEl.style.display = '';
+        }
+      }
+
+      function formatQuotaReset(resetMs) {
+        if (!resetMs) return '';
+        const diffMs = resetMs - Date.now();
+        if (diffMs <= 0) return 'resetting now';
+        const totalMin = Math.ceil(diffMs / 60000);
+        const days = Math.floor(totalMin / 1440);
+        const hours = Math.floor((totalMin % 1440) / 60);
+        const mins = totalMin % 60;
+        if (days > 0) {
+          const when = new Date(resetMs).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+          return 'resets in ' + days + 'd ' + hours + 'h (' + when + ')';
+        }
+        if (hours > 0) return 'resets in ' + hours + 'h ' + mins + 'm';
+        return 'resets in ' + mins + 'm';
+      }
+
+      function renderQuotaBucket(bucket) {
+        const tooltip = [bucket.label, bucket.description].filter(Boolean).join(' · ');
+        const titleAttr = tooltip ? ' title="' + escapeHtml(tooltip) + '"' : '';
+        const resetText = formatQuotaReset(bucket.resetMs);
+        if (bucket.disabled) {
+          return '<div class="quota-bucket"' + titleAttr + '>' +
+            '<div class="quota-bucket-row"><span>' + escapeHtml(bucket.windowLabel) + '</span><span class="muted">Disabled</span></div>' +
+          '</div>';
+        }
+        if (bucket.usedPct === null) {
+          const amountText = bucket.remainingAmount !== null ? bucket.remainingAmount + ' left' : 'Unknown';
+          return '<div class="quota-bucket"' + titleAttr + '>' +
+            '<div class="quota-bucket-row"><span>' + escapeHtml(bucket.windowLabel) + '</span><span>' + escapeHtml(amountText) + '</span></div>' +
+            (resetText ? '<div class="quota-bucket-meta"><span></span><span>' + escapeHtml(resetText) + '</span></div>' : '') +
+          '</div>';
+        }
+        const color = getQuotaColor(bucket.usedPct);
+        const width = Math.min(100, Math.max(0, bucket.usedPct));
+        return '<div class="quota-bucket"' + titleAttr + '>' +
+          '<div class="quota-bucket-row">' +
+            '<span>' + escapeHtml(bucket.windowLabel) + '</span>' +
+            '<span style="color:' + color + ';">' + formatQuotaPct(bucket.usedPct) + ' used</span>' +
+          '</div>' +
+          '<div class="quota-bar"><div class="quota-bar-fill" style="width:' + width.toFixed(1) + '%;background:' + color + ';"></div></div>' +
+          '<div class="quota-bucket-meta">' +
+            '<span>' + formatQuotaPct(bucket.remainingPct) + ' remaining</span>' +
+            '<span>' + escapeHtml(resetText) + '</span>' +
+          '</div>' +
+        '</div>';
+      }
+
+      function renderQuotaModalHtml() {
+        const quota = state.quota;
+        let groupsHtml = '';
+        if (!quota) {
+          groupsHtml = '<div class="muted">No quota data reported by Antigravity.</div>';
+        } else {
+          for (const g of quota.groups) {
+            const isActive = Boolean(state.quotaActiveKey) && g.key === state.quotaActiveKey;
+            const pctHtml = g.maxUsedPct === null
+              ? ''
+              : '<span class="quota-group-pct" style="color:' + getQuotaColor(g.maxUsedPct) + ';" title="Bottleneck: highest usage across windows">' + formatQuotaPct(g.maxUsedPct) + '</span>';
+            groupsHtml +=
+              '<div class="quota-group' + (isActive ? ' is-active' : '') + '"' + (g.description ? ' title="' + escapeHtml(g.description) + '"' : '') + '>' +
+                '<div class="quota-group-head">' +
+                  '<span class="quota-group-name">' + escapeHtml(g.label) +
+                    (isActive ? '<span class="quota-group-badge">Active chat</span>' : '') +
+                  '</span>' +
+                  pctHtml +
+                '</div>' +
+                g.buckets.map(renderQuotaBucket).join('') +
+              '</div>';
+          }
+        }
+        const notes = [];
+        if (quota && quota.source === 'model_config') {
+          notes.push('Per-model quota from the model catalog (window length not reported).');
+        }
+        if (quota && quota.fetchedAtMs) {
+          notes.push('Updated ' + formatRelativeTime(quota.fetchedAtMs));
+        }
+        return '<div class="modal-card quota-modal-card" role="dialog" aria-modal="true">' +
+            '<div class="modal-title">Model usage limits</div>' +
+            '<div class="quota-groups">' + groupsHtml + '</div>' +
+            (notes.length > 0 ? '<div class="quota-footnote">' + escapeHtml(notes.join(' · ')) + '</div>' : '') +
+            '<div class="modal-actions">' +
+              '<button class="btn-secondary" data-action="close-modal">Close</button>' +
+            '</div>' +
+          '</div>';
+      }
+
+      function isQuotaModalOpen() {
+        return Boolean(
+          modalBackdropEl &&
+          modalBackdropEl.classList.contains('open') &&
+          modalBackdropEl.querySelector('.quota-modal-card')
+        );
+      }
+
+      function refreshQuotaModal() {
+        if (!isQuotaModalOpen()) return;
+        const groupsEl = modalBackdropEl.querySelector('.quota-groups');
+        const scrollTop = groupsEl ? groupsEl.scrollTop : 0;
+        const html = renderQuotaModalHtml();
+        if (modalBackdropEl.innerHTML !== html) {
+          modalBackdropEl.innerHTML = html;
+          const nextGroupsEl = modalBackdropEl.querySelector('.quota-groups');
+          if (nextGroupsEl) nextGroupsEl.scrollTop = scrollTop;
+        }
+      }
+
+      function stopQuotaModalTimer() {
+        if (state.quotaModalTimer) {
+          clearInterval(state.quotaModalTimer);
+          state.quotaModalTimer = null;
+        }
+      }
+
+      async function openQuotaModal() {
+        if (!modalBackdropEl) return;
+        modalBackdropEl.innerHTML = renderQuotaModalHtml();
+        modalBackdropEl.classList.add('open');
+        stopQuotaModalTimer();
+        state.quotaModalTimer = setInterval(() => {
+          if (!isQuotaModalOpen()) {
+            stopQuotaModalTimer();
+            return;
+          }
+          refreshQuotaModal();
+        }, 30000);
+        try {
+          const res = await apiFetch('/api/quota?refresh=1');
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data && data.quota && Array.isArray(data.quota.groups) && data.quota.groups.length > 0) {
+            state.quota = data.quota;
+            renderAll();
+          }
+        } catch {}
       }
 
       document.addEventListener('scroll', (e) => {
@@ -2617,6 +2988,8 @@
         renderNewChatDrawer(effectiveScope, pinnedCard);
         renderWorkspacePills(effectiveScope, pinnedId);
         renderDiagnosticsSticky();
+        renderQuotaPill(pinnedCard);
+        refreshQuotaModal();
 
         const q = state.searchQuery.trim().toLowerCase();
         const filtered = state.conversations.filter((c) => {
@@ -2909,6 +3282,9 @@
           if (data.defaultModelEnum) {
             state.defaultModelEnum = data.defaultModelEnum;
           }
+          state.quota = data.quota && Array.isArray(data.quota.groups) && data.quota.groups.length > 0
+            ? data.quota
+            : null;
           if (data.diagnostics) {
             state.diagnostics = data.diagnostics;
           }
@@ -3551,6 +3927,7 @@
 
       function closeModal() {
         if (!modalBackdropEl) return;
+        stopQuotaModalTimer();
         modalBackdropEl.classList.remove('open');
         modalBackdropEl.innerHTML = '';
       }
@@ -3751,6 +4128,10 @@
         }
         if (action === 'open-archived-modal') {
           openArchivedModal();
+          return;
+        }
+        if (action === 'open-quota-modal') {
+          openQuotaModal();
           return;
         }
         if (action === 'confirm-archive-project') {

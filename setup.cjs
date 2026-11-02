@@ -256,12 +256,19 @@ function checkPluginSyncContract() {
   }
 
   let commandOk = true;
+  let sidecarJsonSyncOk = true;
   let configuredCommand = '';
   try {
     const manifest = JSON.parse(fs.readFileSync(destSidecarJson, 'utf-8'));
     configuredCommand = (manifest && manifest.command) || '';
     if (configuredCommand && configuredCommand !== 'node' && !fs.existsSync(configuredCommand)) {
       commandOk = false;
+    }
+    const srcManifest = JSON.parse(fs.readFileSync(path.join(SIDECAR_SRC_DIR, 'sidecar.json'), 'utf-8'));
+    const normDest = JSON.stringify({ ...manifest, command: 'node' });
+    const normSrc = JSON.stringify({ ...srcManifest, command: 'node' });
+    if (normDest !== normSrc) {
+      sidecarJsonSyncOk = false;
     }
   } catch {
     commandOk = false;
@@ -280,6 +287,7 @@ function checkPluginSyncContract() {
 
   const diffs = [];
   if (!filesMatchByteForByte(PLUGIN_SRC_FILE, destPluginJson)) diffs.push('plugin.json');
+  if (!sidecarJsonSyncOk) diffs.push('sidecar.json');
   if (!filesMatchByteForByte(path.join(SIDECAR_SRC_DIR, 'server.cjs'), destServerCjs)) diffs.push('server.cjs');
   if (!filesMatchByteForByte(path.join(SIDECAR_SRC_DIR, 'ui.html'), destUiHtml)) diffs.push('ui.html');
 

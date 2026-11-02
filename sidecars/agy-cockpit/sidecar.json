@@ -1,4 +1,7 @@
 {
+  "agent_permissions": {
+    "allows_user_interactions": true
+  },
   "args": [
     "server.cjs"
   ],

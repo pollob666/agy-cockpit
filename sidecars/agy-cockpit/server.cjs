@@ -1536,6 +1536,12 @@ const LSRPC_CONTRACT_SPECS = [
     critical: false,
     caller: 'server.cjs:handleRequest (POST /api/cancel-invocation)',
     purpose: 'Abort active cascade invocation when cancelling smart handoff generation'
+  },
+  {
+    method: 'RetrieveUserQuotaSummary',
+    critical: false,
+    caller: 'server.cjs:refreshQuotaSummary, parseUserQuotaSummary',
+    purpose: 'Fetch 5-hour / weekly model quota buckets for the header usage ring (falls back to clientModelConfigs[].quotaInfo)'
   }
 ];
 
@@ -1859,7 +1865,7 @@ function getTierSortWeight(tier) {
 
 function parseCascadeModelConfigs(data) {
   if (!data || typeof data !== 'object' || data.error) {
-    return { models: [], defaultModelEnum: '' };
+    return { models: [], defaultModelEnum: '', modelQuotas: [] };
   }
   const defaultModelEnum =
     (data.defaultOverrideModelConfig &&
@@ -1893,6 +1899,7 @@ function parseCascadeModelConfigs(data) {
   const rawConfigs = Array.isArray(data.clientModelConfigs) ? data.clientModelConfigs : [];
   const seenEnums = new Set();
   const models = [];
+  const modelQuotas = [];
 
   for (const cfg of rawConfigs) {
     if (!cfg || cfg.disabled) continue;
@@ -1902,6 +1909,19 @@ function parseCascadeModelConfigs(data) {
     if (!label || !modelEnum || modelEnum === 'MODEL_UNSPECIFIED') continue;
     if (seenEnums.has(modelEnum)) continue;
     seenEnums.add(modelEnum);
+
+    const qi = cfg.quotaInfo;
+    if (qi && typeof qi === 'object' && (qi.remainingFraction !== undefined || qi.resetTime)) {
+      modelQuotas.push({
+        label,
+        modelId: typeof cfg.modelId === 'string' ? cfg.modelId : '',
+        provider: typeof cfg.provider === 'string' ? cfg.provider : '',
+        // proto3 JSON omits a zero remainingFraction on this non-oneof field, so a quotaInfo
+        // that only carries resetTime means the window is exhausted.
+        remainingFraction: qi.remainingFraction !== undefined ? Number(qi.remainingFraction) : 0,
+        resetTime: typeof qi.resetTime === 'string' ? qi.resetTime : ''
+      });
+    }
 
     const { family, tier } = parseModelFamilyAndTier(label);
     const recommended =
@@ -1947,7 +1967,199 @@ function parseCascadeModelConfigs(data) {
     return a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' });
   });
 
-  return { models, defaultModelEnum };
+  return { models, defaultModelEnum, modelQuotas };
+}
+
+const QUOTA_FAMILY_RULES = [
+  { key: 'claude', label: 'Anthropic Claude', re: /claude|anthropic|opus|sonnet|haiku/i },
+  { key: 'gemini', label: 'Google Gemini', re: /gemini|google/i },
+  { key: 'openai', label: 'OpenAI', re: /openai|\bgpt|codex/i }
+];
+
+const QUOTA_WINDOW_ORDER = { '5h': 0, daily: 1, weekly: 2, monthly: 3, other: 4 };
+const QUOTA_WINDOW_LABELS = { '5h': '5-hour', daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly' };
+const QUOTA_DURATION_UNIT_SECONDS = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 };
+
+function classifyQuotaFamilies(...texts) {
+  const joined = texts.filter((t) => typeof t === 'string' && t).join(' ');
+  if (!joined) return [];
+  return QUOTA_FAMILY_RULES.filter((r) => r.re.test(joined));
+}
+
+function classifyQuotaFamily(...texts) {
+  return classifyQuotaFamilies(...texts)[0] || null;
+}
+
+function parseQuotaWindowSeconds(windowText) {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([smhdw])\s*$/i.exec(windowText || '');
+  return m ? Number(m[1]) * QUOTA_DURATION_UNIT_SECONDS[m[2].toLowerCase()] : 0;
+}
+
+function classifyQuotaWindow(windowText, ...hints) {
+  const seconds = parseQuotaWindowSeconds(windowText);
+  if (seconds > 0) {
+    if (Math.abs(seconds - 18000) < 60) return { kind: '5h', label: QUOTA_WINDOW_LABELS['5h'] };
+    if (Math.abs(seconds - 86400) < 60) return { kind: 'daily', label: QUOTA_WINDOW_LABELS.daily };
+    if (Math.abs(seconds - 604800) < 60) return { kind: 'weekly', label: QUOTA_WINDOW_LABELS.weekly };
+    const hours = seconds / 3600;
+    const label = hours >= 48 && hours % 24 === 0 ? `${hours / 24}-day` : `${Number(hours.toFixed(1))}-hour`;
+    return { kind: 'other', label };
+  }
+  const text = [windowText, ...hints].filter((t) => typeof t === 'string' && t).join(' ').toLowerCase();
+  if (/week|7\s*-?\s*d(ay)?\b|168\s*h/.test(text)) return { kind: 'weekly', label: QUOTA_WINDOW_LABELS.weekly };
+  if (/(^|[^\d.])5\s*-?\s*h(our|r)?s?\b|five[\s_-]*hour/.test(text)) return { kind: '5h', label: QUOTA_WINDOW_LABELS['5h'] };
+  if (/\bdaily\b|\bday\b|24\s*-?\s*h/.test(text)) return { kind: 'daily', label: QUOTA_WINDOW_LABELS.daily };
+  if (/month|30\s*-?\s*d/.test(text)) return { kind: 'monthly', label: QUOTA_WINDOW_LABELS.monthly };
+  return { kind: 'other', label: '' };
+}
+
+function normalizeQuotaBucket(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const fraction = Number(raw.remainingFraction);
+  const hasFraction = raw.remainingFraction !== undefined && raw.remainingFraction !== null && Number.isFinite(fraction);
+  const amount = Number(raw.remainingAmount);
+  const hasAmount = raw.remainingAmount !== undefined && raw.remainingAmount !== null && Number.isFinite(amount);
+  if (!hasFraction && !hasAmount && !raw.disabled) return null;
+
+  const displayName = typeof raw.displayName === 'string' ? raw.displayName.trim() : '';
+  const bucketId = typeof raw.bucketId === 'string' ? raw.bucketId.trim() : '';
+  const windowText = typeof raw.window === 'string' ? raw.window.trim() : '';
+  const win = classifyQuotaWindow(windowText, bucketId, displayName);
+  const remainingPct = hasFraction ? Math.min(100, Math.max(0, fraction * 100)) : null;
+  const resetMs = typeof raw.resetTime === 'string' ? Date.parse(raw.resetTime) || 0 : 0;
+  return {
+    id: bucketId || displayName || windowText,
+    label: displayName,
+    description: typeof raw.description === 'string' ? raw.description.trim() : '',
+    windowKind: win.kind,
+    windowLabel: win.label || displayName || windowText || 'Quota',
+    usedPct: remainingPct === null ? null : Number((100 - remainingPct).toFixed(1)),
+    remainingPct: remainingPct === null ? null : Number(remainingPct.toFixed(1)),
+    remainingAmount: hasAmount ? amount : null,
+    resetMs,
+    disabled: Boolean(raw.disabled)
+  };
+}
+
+function finalizeQuotaGroups(groupMap) {
+  const groups = [];
+  for (const g of groupMap.values()) {
+    if (g.buckets.length === 0) continue;
+    g.buckets.sort((a, b) =>
+      (QUOTA_WINDOW_ORDER[a.windowKind] ?? 9) - (QUOTA_WINDOW_ORDER[b.windowKind] ?? 9) ||
+      (a.resetMs || 0) - (b.resetMs || 0)
+    );
+    const usedValues = g.buckets.filter((b) => !b.disabled && b.usedPct !== null).map((b) => b.usedPct);
+    g.maxUsedPct = usedValues.length > 0 ? Math.max(...usedValues) : null;
+    groups.push(g);
+  }
+  const familyRank = (key) => {
+    const idx = QUOTA_FAMILY_RULES.findIndex((r) => r.key === key);
+    return idx === -1 ? QUOTA_FAMILY_RULES.length : idx;
+  };
+  groups.sort((a, b) => familyRank(a.family) - familyRank(b.family) || a.label.localeCompare(b.label));
+  return groups;
+}
+
+function addQuotaBucketToGroup(groupMap, familyRules, fallbackLabel, bucket) {
+  const rules = Array.isArray(familyRules) ? familyRules : (familyRules ? [familyRules] : []);
+  const primaryRule = rules[0] || null;
+  const families = rules.map((r) => r.key);
+  const key = primaryRule ? primaryRule.key : (fallbackLabel || 'general').toLowerCase();
+  let group = groupMap.get(key);
+  if (!group) {
+    group = {
+      key,
+      family: primaryRule ? primaryRule.key : '',
+      families,
+      label: fallbackLabel || (primaryRule ? primaryRule.label : 'General'),
+      description: '',
+      buckets: [],
+      maxUsedPct: null
+    };
+    groupMap.set(key, group);
+  } else {
+    for (const f of families) {
+      if (!group.families.includes(f)) group.families.push(f);
+    }
+  }
+  group.buckets.push(bucket);
+  return group;
+}
+
+function parseUserQuotaSummary(res) {
+  if (!res || typeof res !== 'object' || res.error) return null;
+  const root = res.response && typeof res.response === 'object' ? res.response : res;
+  const groupMap = new Map();
+
+  const rawGroups = Array.isArray(root.groups) ? root.groups : [];
+  for (const g of rawGroups) {
+    if (!g || typeof g !== 'object') continue;
+    const groupLabel = typeof g.displayName === 'string' ? g.displayName.trim() : '';
+    const rawBuckets = Array.isArray(g.buckets) ? g.buckets : [];
+    const bucketHints = rawBuckets.flatMap((b) => [b && b.displayName, b && b.bucketId]);
+    let familyRules = classifyQuotaFamilies(groupLabel);
+    if (familyRules.length === 0) familyRules = classifyQuotaFamilies(g.description);
+    if (familyRules.length === 0) familyRules = classifyQuotaFamilies(...bucketHints);
+    for (const rb of rawBuckets) {
+      const bucket = normalizeQuotaBucket(rb);
+      if (!bucket) continue;
+      const group = addQuotaBucketToGroup(groupMap, familyRules, groupLabel, bucket);
+      if (!group.description && typeof g.description === 'string') {
+        group.description = g.description.trim();
+      }
+    }
+  }
+
+  const rawTopBuckets = Array.isArray(root.buckets) ? root.buckets : [];
+  for (const rb of rawTopBuckets) {
+    const bucket = normalizeQuotaBucket(rb);
+    if (!bucket) continue;
+    const familyRules = classifyQuotaFamilies(rb.displayName, rb.bucketId, rb.description);
+    const primaryRule = familyRules[0] || null;
+    const existing = primaryRule ? groupMap.get(primaryRule.key) : null;
+    addQuotaBucketToGroup(groupMap, familyRules, existing ? existing.label : '', bucket);
+  }
+
+  return {
+    source: 'quota_summary',
+    description: typeof root.description === 'string' ? root.description.trim() : '',
+    groups: finalizeQuotaGroups(groupMap)
+  };
+}
+
+function buildQuotaFromModelConfigs(modelQuotas) {
+  const groupMap = new Map();
+  for (const mq of Array.isArray(modelQuotas) ? modelQuotas : []) {
+    const familyRule = classifyQuotaFamily(mq.label, mq.modelId, mq.provider);
+    const key = familyRule ? familyRule.key : 'general';
+    const existing = groupMap.get(key);
+    const prevBucket = existing && existing.buckets[0];
+    if (prevBucket && prevBucket.remainingPct !== null && prevBucket.remainingPct <= mq.remainingFraction * 100) {
+      continue;
+    }
+    const bucket = normalizeQuotaBucket({
+      displayName: mq.label,
+      remainingFraction: mq.remainingFraction,
+      resetTime: mq.resetTime
+    });
+    if (!bucket) continue;
+    bucket.windowKind = 'other';
+    bucket.windowLabel = 'Current window';
+    if (existing) {
+      existing.buckets = [bucket];
+    } else {
+      addQuotaBucketToGroup(groupMap, familyRule, '', bucket);
+    }
+  }
+  return { source: 'model_config', description: '', groups: finalizeQuotaGroups(groupMap) };
+}
+
+function summarizeQuotaForDiagnostics(quota) {
+  if (!quota || !Array.isArray(quota.groups) || quota.groups.length === 0) return 'no quota buckets';
+  return quota.groups
+    .map((g) => `${g.label} [${g.buckets.map((b) => `${b.windowLabel} ${b.usedPct === null ? '?' : b.usedPct + '%'} used`).join(', ')}]`)
+    .join('; ');
 }
 
 function rewriteUiHtmlLinks(html, token, conversationId) {
@@ -2055,6 +2267,11 @@ class AgyCockpitServer {
     this.modelResolveInFlight = new Set();
     this.modelResolveCooldown = new Map();
     this.modelsCatalogRev = 1;
+    this.cachedModelQuotas = [];
+    this.cachedQuota = null;
+    this.quotaFetchedAtMs = 0;
+    this.quotaFetchPromise = null;
+    this.lastQuotaSignature = '';
     this.initialBootScanDone = false;
 
     this.diagnosticsState = null;
@@ -3048,6 +3265,7 @@ class AgyCockpitServer {
         const res = await callLanguageServerRpc('GetCascadeModelConfigData', {});
         const parsed = parseCascadeModelConfigs(res);
         if (parsed.models.length > 0) {
+          this.cachedModelQuotas = parsed.modelQuotas;
           const prevSig = JSON.stringify([
             this.cachedModelsCatalog.defaultModelEnum,
             this.cachedModelsCatalog.models.map((m) => m.modelEnum)
@@ -3074,6 +3292,51 @@ class AgyCockpitServer {
       return this.cachedModelsCatalog;
     })();
     return this.modelsFetchPromise;
+  }
+
+  refreshQuotaSummary({ maxAgeMs = 60000, forceRemote = false } = {}) {
+    if (this.quotaFetchPromise) return this.quotaFetchPromise;
+    if (Date.now() - this.quotaFetchedAtMs < maxAgeMs) {
+      return Promise.resolve(this.cachedQuota);
+    }
+    this.quotaFetchedAtMs = Date.now();
+    this.quotaFetchPromise = (async () => {
+      try {
+        const res = await callLanguageServerRpc(
+          'RetrieveUserQuotaSummary',
+          forceRemote ? { forceRefresh: true } : {},
+          8000
+        );
+        const summary = parseUserQuotaSummary(res);
+        if (summary && summary.groups.length > 0) {
+          this.applyQuota(summary);
+        } else {
+          if (this.cachedModelQuotas.length === 0) {
+            await this.getModelsCatalog(false);
+          }
+          const fallback = buildQuotaFromModelConfigs(this.cachedModelQuotas);
+          if (fallback.groups.length > 0) {
+            this.applyQuota(fallback);
+          } else if (summary) {
+            this.applyQuota(null);
+          }
+        }
+      } catch {} finally {
+        this.quotaFetchedAtMs = Date.now();
+        this.quotaFetchPromise = null;
+      }
+      return this.cachedQuota;
+    })();
+    return this.quotaFetchPromise;
+  }
+
+  applyQuota(quota) {
+    const signature = JSON.stringify(quota ? [quota.source, quota.groups] : null);
+    this.cachedQuota = quota ? { ...quota, fetchedAtMs: Date.now() } : null;
+    if (signature !== this.lastQuotaSignature) {
+      this.lastQuotaSignature = signature;
+      this.stateVersion += 1;
+    }
   }
 
   async resolveConversationModelAsync(convId, force = false) {
@@ -3171,6 +3434,7 @@ class AgyCockpitServer {
 
   triggerBackgroundModelResolution(hostConvId, visibleEntries) {
     void this.getModelsCatalog(false);
+    void this.refreshQuotaSummary();
     const candidateIds = [];
     if (hostConvId && UUID_RE.test(hostConvId)) {
       candidateIds.push(hostConvId);
@@ -3650,6 +3914,16 @@ class AgyCockpitServer {
             );
           } else {
             let metaDetail = `GetCascadeModelConfigData returned ${parsedCatalog.models.length} models (default=${parsedCatalog.defaultModelEnum || 'auto'})`;
+            const quotaRes = await callLanguageServerRpc('RetrieveUserQuotaSummary', {}, 6000);
+            const parsedQuota = parseUserQuotaSummary(quotaRes);
+            if (!parsedQuota) {
+              metaDetail += `; RetrieveUserQuotaSummary unavailable (${String((quotaRes && quotaRes.error) || 'empty').slice(0, 160)}), quota ring falls back to ${parsedCatalog.modelQuotas.length} clientModelConfigs[].quotaInfo entries`;
+            } else if (parsedQuota.groups.length === 0) {
+              const quotaRoot = quotaRes.response && typeof quotaRes.response === 'object' ? quotaRes.response : quotaRes;
+              metaDetail += `; RetrieveUserQuotaSummary returned no usable buckets (keys: ${Object.keys(quotaRoot).join(',') || 'none'}), fallback quotaInfo entries: ${parsedCatalog.modelQuotas.length}`;
+            } else {
+              metaDetail += `; RetrieveUserQuotaSummary: ${summarizeQuotaForDiagnostics(parsedQuota)}`;
+            }
             const sampleEntry = [...this.convCache.values()].find((e) => !e.isSubagent && UUID_RE.test(e.id));
             if (sampleEntry) {
               const metaRes = await callLanguageServerRpc(
@@ -4237,6 +4511,9 @@ class AgyCockpitServer {
       };
     }
 
+    if (isForce) {
+      void this.refreshQuotaSummary({ maxAgeMs: 15000 });
+    }
     this.triggerBackgroundModelResolution(hostConvId, visibleEntries);
 
     const now = Date.now();
@@ -4312,6 +4589,7 @@ class AgyCockpitServer {
       activeWorkspaceKey: activeWorkspaceKey || '',
       availableModels: this.cachedModelsCatalog.models,
       defaultModelEnum: this.cachedModelsCatalog.defaultModelEnum || '',
+      quota: this.cachedQuota,
       diagnostics: this.getDiagnosticsStatusPayload(query),
       workspaces,
       archivedProjects,
@@ -4499,6 +4777,13 @@ class AgyCockpitServer {
       return;
     }
 
+    if (req.method === 'GET' && pathname === '/api/quota') {
+      const forceRemote = query.refresh === '1';
+      const quota = await this.refreshQuotaSummary({ maxAgeMs: forceRemote ? 5000 : 60000, forceRemote });
+      sendJson(res, 200, { quota: quota || null, version: this.stateVersion });
+      return;
+    }
+
     if (req.method === 'GET' && pathname === '/api/models') {
       const catalog = await this.getModelsCatalog(query.refresh === '1');
       const qConvId = typeof query.convId === 'string' ? query.convId.trim().toLowerCase() : '';
@@ -4605,8 +4890,23 @@ class AgyCockpitServer {
         sendJson(res, 400, { error: 'Invalid conversationId or empty message' });
         return;
       }
+      const cleanConvId = convId.toLowerCase();
+      const sendRpc = await callLanguageServerRpc(
+        'SendUserCascadeMessage',
+        {
+          cascadeId: cleanConvId,
+          items: [{ text: message }],
+          metadata: {},
+          clientType: 'CHAT_CLIENT_REQUEST_STREAM_CLIENT_TYPE_IDE'
+        },
+        12000
+      );
+      if (sendRpc && !sendRpc.error) {
+        sendJson(res, 200, { response: sendRpc });
+        return;
+      }
       this.refreshProjectsRegistry(false);
-      const entry = this.convCache.get(convId.toLowerCase()) || this.refreshSingleEntry(convId.toLowerCase());
+      const entry = this.convCache.get(cleanConvId) || this.refreshSingleEntry(cleanConvId);
       const wsPath = (typeof body.workspacePath === 'string' && body.workspacePath.trim()) || (entry && entry.workspacePath) || '';
       const matchedProj = wsPath ? this.matchProjectForWorkspace(wsPath) : null;
       const effectiveProjectId =
@@ -4730,18 +5030,19 @@ class AgyCockpitServer {
       const baseStartPayload = {
         source: 'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',
         trajectoryType: 'CORTEX_TRAJECTORY_TYPE_CASCADE',
-        ...(selectedModelEnum ? { requestedModel: { model: selectedModelEnum } } : {})
+        ...(selectedModelEnum ? { requestedModel: selectedModelEnum } : {})
       };
       const startPayload = { ...baseStartPayload };
+      if (nativeWsPath) {
+        try {
+          startPayload.workspaceUris = [pathToFileURL(nativeWsPath).href];
+        } catch {}
+      }
       if (effectiveProjectId) {
         startPayload.projectEnvConfig = {
           projectId: effectiveProjectId,
           defaultProjectEnvironment: {}
         };
-      } else if (nativeWsPath) {
-        try {
-          startPayload.workspaceUris = [pathToFileURL(nativeWsPath).href];
-        } catch {}
       }
 
       let startRpc = await callLanguageServerRpc('StartCascade', startPayload, 8000);
@@ -4751,6 +5052,11 @@ class AgyCockpitServer {
           retryPayload.workspaceUris = [pathToFileURL(nativeWsPath).href];
         } catch {}
         startRpc = await callLanguageServerRpc('StartCascade', retryPayload, 8000);
+      }
+      if (startRpc.error && selectedModelEnum) {
+        const retryWithoutModel = { ...startPayload };
+        delete retryWithoutModel.requestedModel;
+        startRpc = await callLanguageServerRpc('StartCascade', retryWithoutModel, 8000);
       }
 
       const rawCascadeId =
@@ -4899,5 +5205,9 @@ module.exports = {
   computeMedian,
   normalizeWorkspacePath,
   resolveCanonicalWorkspace,
-  parseGitReflogTail
+  parseGitReflogTail,
+  parseCascadeModelConfigs,
+  parseUserQuotaSummary,
+  buildQuotaFromModelConfigs,
+  classifyQuotaWindow
 };
