@@ -1417,7 +1417,21 @@
       color: var(--muted-foreground, #888888);
       display: flex;
       flex-direction: column;
-      gap: 3px;
+      gap: 4px;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    .search-hits strong {
+      color: var(--foreground, #ededed);
+    }
+
+    .search-mark {
+      background: rgba(250, 204, 21, 0.24);
+      color: #fef08a;
+      border-radius: 3px;
+      padding: 0 2px;
+      font-weight: 600;
     }
 
     .empty-box {
@@ -1888,6 +1902,37 @@
           .replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;')
           .replace(/'/g, '&#39;');
+      }
+
+      function highlightSearchText(rawText, rawQuery) {
+        const str = String(rawText ?? '');
+        const q = String(rawQuery ?? '').replace(/\s+/g, ' ').trim();
+        if (!q || !str) return escapeHtml(str);
+        const pattern = q
+          .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          .replace(/ /g, '\\s+');
+        const re = new RegExp(pattern, 'gi');
+        let pos = 0;
+        let out = '';
+        let m;
+        while ((m = re.exec(str)) !== null) {
+          const idx = m.index;
+          const mLen = m[0].length;
+          if (mLen === 0) {
+            re.lastIndex += 1;
+            continue;
+          }
+          if (idx > pos) {
+            out += escapeHtml(str.slice(pos, idx));
+          }
+          out += '<mark class="search-mark">' + escapeHtml(m[0]) + '</mark>';
+          pos = idx + mLen;
+        }
+        if (pos === 0) return escapeHtml(str);
+        if (pos < str.length) {
+          out += escapeHtml(str.slice(pos));
+        }
+        return out;
       }
 
       function formatRelativeTime(isoOrMs) {
@@ -3136,12 +3181,14 @@
           ? '<span>· ' + escapeHtml(card.workspaceName) + '</span>'
           : '';
 
-        const searchHit = state.searchMatches && state.searchMatches[card.id];
+        const activeSearchQ = (state.lastFetchedQuery || '').trim();
+        const searchHit = activeSearchQ && state.searchMatches && state.searchMatches[card.id];
         let searchHitsHtml = '';
         if (searchHit && Array.isArray(searchHit.matchingPrompts) && searchHit.matchingPrompts.length > 0) {
           searchHitsHtml = '<div class="search-hits">';
           for (const mp of searchHit.matchingPrompts) {
-            searchHitsHtml += '<div><strong>#' + mp.index + ':</strong> ' + escapeHtml(mp.text.slice(0, 160)) + '</div>';
+            const hitLabel = mp.label || ('#' + mp.index);
+            searchHitsHtml += '<div><strong>' + escapeHtml(hitLabel) + ':</strong> ' + highlightSearchText(mp.text, activeSearchQ) + '</div>';
           }
           searchHitsHtml += '</div>';
         }
@@ -3158,7 +3205,7 @@
             '<div class="conv-title-wrap">' +
               renderStatusBadge(card, true) +
               pinIconHtml +
-              '<span class="conv-title">' + escapeHtml(titleText) + '</span>' +
+              '<span class="conv-title">' + highlightSearchText(titleText, activeSearchQ) + '</span>' +
             '</div>' +
             '<span class="muted">' + escapeHtml(formatRelativeTime(card.lastActiveMs)) + '</span>' +
           '</div>' +
@@ -3565,7 +3612,7 @@
         refreshQuotaModal();
         refreshContextBreakdownModalOnPoll();
 
-        const q = state.searchQuery.trim().toLowerCase();
+        const q = (state.lastFetchedQuery || '').trim().toLowerCase();
         const filtered = state.conversations.filter((c) => {
           if (c.isSubagent) return false;
           if (c.id === pinnedId) return false;
@@ -3809,8 +3856,9 @@
       async function fetchStatus(force = false) {
         if (!force && state.pollInFlight) return;
         state.pollInFlight = true;
+        let pollOk = false;
         try {
-          const currentQuery = state.searchQuery.trim();
+          const currentQuery = state.searchQuery.replace(/\s+/g, ' ').trim();
           const queryChanged = currentQuery !== state.lastFetchedQuery;
           const params = new URLSearchParams();
           if (!force && !queryChanged && state.version > 0 && !urlSimulateDiag) {
@@ -3831,6 +3879,7 @@
 
           const res = await apiFetch('/api/status?' + params.toString());
           if (!res.ok) return;
+          pollOk = true;
           const data = await res.json();
           if (data.uiMtimeMs) {
             if (state.uiMtimeMs > 0 && data.uiMtimeMs !== state.uiMtimeMs) {
@@ -3842,7 +3891,14 @@
           if (data.unchanged && !force && !queryChanged && !urlSimulateDiag) return;
 
           state.version = data.version || state.version;
-          state.lastFetchedQuery = currentQuery;
+          const latestQueryNow = state.searchQuery.replace(/\s+/g, ' ').trim();
+          if (!latestQueryNow) {
+            state.lastFetchedQuery = '';
+            state.searchMatches = null;
+          } else if (currentQuery) {
+            state.lastFetchedQuery = currentQuery;
+            state.searchMatches = data.searchMatches || null;
+          }
           if (data.hostConversationId && !state.hostConvId) {
             state.hostConvId = String(data.hostConversationId).trim().toLowerCase();
           }
@@ -3863,7 +3919,6 @@
             state.diagnostics = data.diagnostics;
           }
           state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
-          state.searchMatches = data.searchMatches || null;
 
           syncAllHandoffStates();
           renderAll();
@@ -3873,6 +3928,10 @@
         } finally {
           state.pollInFlight = false;
           state.lastPollDoneMs = Date.now();
+          const pendingQuery = state.searchQuery.replace(/\s+/g, ' ').trim();
+          if (pollOk && pendingQuery !== state.lastFetchedQuery) {
+            fetchStatus(false);
+          }
         }
       }
 
@@ -5041,6 +5100,12 @@
       searchInput.addEventListener('input', () => {
         state.searchQuery = searchInput.value;
         clearTimeout(searchTimer);
+        if (!state.searchQuery.trim()) {
+          state.lastFetchedQuery = '';
+          state.searchMatches = null;
+          renderAll();
+          return;
+        }
         searchTimer = setTimeout(() => {
           fetchStatus(false);
         }, 120);

@@ -356,6 +356,48 @@ function cleanModelPreview(rawContent) {
   return text.slice(0, 300);
 }
 
+function normalizeSearchText(str) {
+  if (!str || typeof str !== 'string') return '';
+  return str.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function buildCenteredSearchSnippet(rawText, rawQuery, maxChars = 160) {
+  if (!rawText || typeof rawText !== 'string') return '';
+  const norm = rawText.replace(/\s+/g, ' ').trim();
+  if (!norm) return '';
+  const qLower = normalizeSearchText(rawQuery);
+  const effectiveMax = Math.max(maxChars, qLower.length + 24);
+  if (!qLower || norm.length <= effectiveMax) return norm;
+  const lower = norm.toLowerCase();
+  const idx = lower.indexOf(qLower);
+  if (idx < 0) return norm.slice(0, maxChars).trimEnd() + '…';
+
+  const matchEnd = idx + qLower.length;
+  const sideBudget = Math.max(0, Math.floor((effectiveMax - qLower.length) / 2));
+  let start = Math.max(0, idx - sideBudget);
+  let end = Math.min(norm.length, start + effectiveMax);
+  if (end === norm.length) {
+    start = Math.max(0, end - effectiveMax);
+  }
+
+  if (start > 0 && norm[start - 1] !== ' ') {
+    const spaceAfter = norm.indexOf(' ', start);
+    if (spaceAfter >= start && spaceAfter < idx && spaceAfter - start <= 16) {
+      start = spaceAfter + 1;
+    }
+  }
+  if (end < norm.length && norm[end] !== ' ') {
+    const spaceBefore = norm.lastIndexOf(' ', end);
+    if (spaceBefore >= matchEnd && end - spaceBefore <= 16) {
+      end = spaceBefore;
+    }
+  }
+
+  const prefix = start > 0 ? '…' : '';
+  const suffix = end < norm.length ? '…' : '';
+  return prefix + norm.slice(start, end).trim() + suffix;
+}
+
 function classifyPollution(compactCount, compactedPrompts = 0) {
   if (compactCount <= 2 && compactedPrompts === 0) {
     return { id: 'fresh', label: 'Fresh', color: '#10b981' };
@@ -1541,15 +1583,15 @@ function extractAnnotationFromPbtxt(raw) {
 
 function rebuildSearchCorpus(entry) {
   const parts = [];
-  if (entry.title) parts.push(entry.title);
-  if (entry.firstPrompt) parts.push(entry.firstPrompt);
-  if (entry.lastPrompt) parts.push(entry.lastPrompt);
-  if (entry.checkpointOverview) parts.push(entry.checkpointOverview);
+  if (entry.title) parts.push(normalizeSearchText(entry.title));
+  if (entry.firstPrompt) parts.push(normalizeSearchText(entry.firstPrompt));
+  if (entry.lastPrompt) parts.push(normalizeSearchText(entry.lastPrompt));
+  if (entry.checkpointOverview) parts.push(normalizeSearchText(entry.checkpointOverview));
   for (const p of entry.prompts) {
-    parts.push(p.text);
+    parts.push(normalizeSearchText(p.text));
   }
   Object.defineProperty(entry, 'searchCorpusLower', {
-    value: parts.join('\n').toLowerCase(),
+    value: parts.join('\n'),
     writable: true,
     enumerable: false,
     configurable: true
@@ -5262,23 +5304,61 @@ class AgyCockpitServer {
     }
 
     let searchMatches = null;
-    const rawSearch = (query.q || '').trim().toLowerCase();
+    const rawSearch = normalizeSearchText(query.q || '');
     if (rawSearch) {
       searchMatches = {};
       for (const entry of visibleEntries) {
-        const customTitleLower = (this.customTitles.get(entry.id) || '').toLowerCase();
+        const customTitleNorm = normalizeSearchText(this.customTitles.get(entry.id) || '');
         const corpusHit = Boolean(entry.searchCorpusLower && entry.searchCorpusLower.includes(rawSearch));
-        const customTitleHit = Boolean(customTitleLower && customTitleLower.includes(rawSearch));
+        const customTitleHit = Boolean(customTitleNorm && customTitleNorm.includes(rawSearch));
         if (!corpusHit && !customTitleHit) continue;
         const matchingPrompts = [];
         for (const p of entry.prompts) {
-          if (p.text.toLowerCase().includes(rawSearch)) {
+          if (normalizeSearchText(p.text).includes(rawSearch)) {
             matchingPrompts.push({
               index: p.index,
+              label: '#' + p.index,
               createdAt: p.createdAt,
-              text: p.text.slice(0, 400)
+              text: buildCenteredSearchSnippet(p.text, rawSearch, 160)
             });
             if (matchingPrompts.length >= 3) break;
+          }
+        }
+        if (matchingPrompts.length === 0) {
+          if (entry.checkpointOverview && normalizeSearchText(entry.checkpointOverview).includes(rawSearch)) {
+            matchingPrompts.push({
+              index: 0,
+              label: 'Summary',
+              createdAt: '',
+              text: buildCenteredSearchSnippet(entry.checkpointOverview, rawSearch, 160)
+            });
+          } else if (entry.firstPrompt && normalizeSearchText(entry.firstPrompt).includes(rawSearch)) {
+            matchingPrompts.push({
+              index: 1,
+              label: '#1',
+              createdAt: '',
+              text: buildCenteredSearchSnippet(entry.firstPrompt, rawSearch, 160)
+            });
+          } else if (entry.lastPrompt && normalizeSearchText(entry.lastPrompt).includes(rawSearch)) {
+            const fallbackIdx = entry.promptCount || 1;
+            matchingPrompts.push({
+              index: fallbackIdx,
+              label: '#' + fallbackIdx,
+              createdAt: '',
+              text: buildCenteredSearchSnippet(entry.lastPrompt, rawSearch, 160)
+            });
+          } else if (
+            entry.title &&
+            customTitleNorm &&
+            !customTitleHit &&
+            normalizeSearchText(entry.title).includes(rawSearch)
+          ) {
+            matchingPrompts.push({
+              index: 0,
+              label: 'Default title',
+              createdAt: '',
+              text: buildCenteredSearchSnippet(entry.title, rawSearch, 160)
+            });
           }
         }
         searchMatches[entry.id] = {
@@ -6012,5 +6092,6 @@ module.exports = {
   classifyQuotaWindow,
   estimateRawUtf8Bytes,
   cleanTranscriptArgString,
-  buildContextBreakdownForTranscript
+  buildContextBreakdownForTranscript,
+  buildCenteredSearchSnippet
 };
