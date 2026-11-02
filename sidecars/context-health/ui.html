@@ -610,6 +610,28 @@
       40% { opacity: 1; transform: scale(1.15); }
     }
 
+    .wait-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 15px;
+      height: 15px;
+      border-radius: 50%;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1;
+      color: #fbbf24;
+      background: rgba(245, 158, 11, 0.18);
+      border: 1px solid rgba(245, 158, 11, 0.55);
+      flex-shrink: 0;
+      animation: chAmberGlow 2s infinite ease-in-out;
+    }
+
+    @keyframes chAmberGlow {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.35); }
+      50% { box-shadow: 0 0 7px 1px rgba(245, 158, 11, 0.55); }
+    }
+
     .conv-row {
       background: var(--card, #141414);
       border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
@@ -625,6 +647,10 @@
       border-color: rgba(59, 130, 246, 0.38);
     }
 
+    .conv-row.is-waiting {
+      border-color: rgba(245, 158, 11, 0.42);
+    }
+
     .conv-row-header {
       display: flex;
       flex-direction: column;
@@ -637,6 +663,10 @@
 
     .conv-row.is-unread:hover {
       border-color: rgba(59, 130, 246, 0.55);
+    }
+
+    .conv-row.is-waiting:hover {
+      border-color: rgba(245, 158, 11, 0.6);
     }
 
     .conv-row-top {
@@ -696,6 +726,10 @@
     .conv-msg-ai.unread .conv-msg-role,
     .conv-msg-ai.thinking .conv-msg-role {
       color: #60a5fa;
+    }
+
+    .conv-msg-ai.waiting .conv-msg-role {
+      color: #fbbf24;
     }
 
     .conv-msg-ai.unread .conv-msg-text {
@@ -1857,9 +1891,21 @@
           state.openHandoffId === card.id ||
           Boolean(state.pendingSmartHandoff && state.pendingSmartHandoff.convId === card.id);
 
+        let activeBadgeHtml = '';
+        if (card.waitState === 'permission') {
+          activeBadgeHtml = '<span class="wait-badge" title="Waiting for permission approval">!</span>';
+        } else if (card.waitState === 'question') {
+          activeBadgeHtml = '<span class="wait-badge" title="Waiting for your answer">?</span>';
+        } else if (card.isThinking) {
+          activeBadgeHtml = '<span class="thinking-dots" title="Agent is thinking"><span></span><span></span><span></span></span>';
+        }
+
         return (
           '<div class="conv-row-top" data-action="open-chat" data-id="' + escapeHtml(card.id) + '" title="Switch to this conversation">' +
-            '<span class="conv-title">' + escapeHtml(titleText) + '</span>' +
+            '<div class="conv-title-wrap">' +
+              activeBadgeHtml +
+              '<span class="conv-title">' + escapeHtml(titleText) + '</span>' +
+            '</div>' +
             '<span class="muted">' + escapeHtml(formatRelativeTime(card.lastActiveMs)) + '</span>' +
           '</div>' +
           '<div class="status-row">' +
@@ -1937,7 +1983,11 @@
         const aiMsgText = (card.lastModelResponse || '').trim();
 
         let statusBadgeHtml = '';
-        if (card.isThinking) {
+        if (card.waitState === 'permission') {
+          statusBadgeHtml = '<span class="wait-badge" title="Waiting for permission approval">!</span>';
+        } else if (card.waitState === 'question') {
+          statusBadgeHtml = '<span class="wait-badge" title="Waiting for your answer">?</span>';
+        } else if (card.isThinking) {
           statusBadgeHtml = '<span class="thinking-dots" title="Agent is thinking"><span></span><span></span><span></span></span>';
         } else if (card.unread) {
           statusBadgeHtml = '<span class="unread-dot" title="Unread reply"></span>';
@@ -1945,7 +1995,7 @@
 
         let previewsHtml = '';
         const showUserLine = Boolean(userMsgText);
-        const showAiLine = Boolean(card.isThinking || aiMsgText);
+        const showAiLine = Boolean(card.isThinking || card.waitState || aiMsgText);
         if (showUserLine || showAiLine) {
           previewsHtml += '<div class="conv-previews" data-action="open-chat" data-id="' + escapeHtml(card.id) + '">';
           if (showUserLine) {
@@ -1955,7 +2005,17 @@
                 '<span class="conv-msg-text">' + escapeHtml(userMsgText) + '</span>' +
               '</div>';
           }
-          if (card.isThinking) {
+          if (card.waitState) {
+            const waitFallback = card.waitState === 'question'
+              ? 'Waiting for your answer...'
+              : 'Waiting for permission...';
+            const waitText = aiMsgText || waitFallback;
+            previewsHtml +=
+              '<div class="conv-msg-line conv-msg-ai waiting" title="' + escapeHtml(waitText) + '">' +
+                '<span class="conv-msg-role">AI:</span>' +
+                '<span class="conv-msg-text">' + escapeHtml(waitText) + '</span>' +
+              '</div>';
+          } else if (card.isThinking) {
             previewsHtml +=
               '<div class="conv-msg-line conv-msg-ai thinking" title="' + escapeHtml(aiMsgText || 'Agent is thinking...') + '">' +
                 '<span class="conv-msg-role">AI:</span>' +
@@ -2052,7 +2112,8 @@
 
       function syncCardDom(cardEl, card, headerHtml) {
         if (cardEl.classList.contains('conv-row')) {
-          cardEl.classList.toggle('is-unread', Boolean(card.unread));
+          cardEl.classList.toggle('is-waiting', Boolean(card.waitState));
+          cardEl.classList.toggle('is-unread', Boolean(!card.waitState && card.unread));
         }
         const headerSlot = cardEl.querySelector('.card-header-slot');
         if (headerSlot && headerSlot.innerHTML !== headerHtml) {
@@ -2190,9 +2251,13 @@
         const countsByWs = new Map();
         const unreadByWs = new Map();
         const thinkingByWs = new Map();
+        const waitPermByWs = new Map();
+        const waitQuestionByWs = new Map();
         for (const c of allMain) {
           const k = c.workspaceKey || '__unscoped__';
-          if (c.isThinking) thinkingByWs.set(k, true);
+          if (c.waitState === 'permission') waitPermByWs.set(k, true);
+          else if (c.waitState === 'question') waitQuestionByWs.set(k, true);
+          else if (c.isThinking) thinkingByWs.set(k, true);
           if (c.id !== pinnedId) {
             countsByWs.set(k, (countsByWs.get(k) || 0) + 1);
             if (c.unread) unreadByWs.set(k, true);
@@ -2202,9 +2267,20 @@
         let html = '';
         for (const ws of state.workspaces) {
           const otherCount = countsByWs.get(ws.key) || 0;
+          const hasWaitPerm = Boolean(waitPermByWs.get(ws.key));
+          const hasWaitQuestion = Boolean(waitQuestionByWs.get(ws.key));
           const hasUnread = Boolean(unreadByWs.get(ws.key));
           const hasThinking = Boolean(thinkingByWs.get(ws.key));
-          if (otherCount === 0 && !hasThinking && !hasUnread && effectiveScope !== ws.key) continue;
+          if (
+            otherCount === 0 &&
+            !hasWaitPerm &&
+            !hasWaitQuestion &&
+            !hasThinking &&
+            !hasUnread &&
+            effectiveScope !== ws.key
+          ) {
+            continue;
+          }
           const isActive = effectiveScope === ws.key;
           const projAttrs = ws.projectId
             ? ' data-project-id="' + escapeHtml(ws.projectId) + '" data-project-name="' + escapeHtml(ws.name) + '"'
@@ -2213,6 +2289,12 @@
             ? (ws.path ? ws.path + ' · Right-click to archive project' : 'Right-click to archive project')
             : (ws.path || '');
           let indicatorHtml = '';
+          if (hasWaitPerm) {
+            indicatorHtml += '<span class="wait-badge" title="Waiting for permission approval in this project">!</span>';
+          }
+          if (hasWaitQuestion) {
+            indicatorHtml += '<span class="wait-badge" title="Waiting for your answer in this project">?</span>';
+          }
           if (hasThinking) {
             indicatorHtml += '<span class="thinking-dots" title="Agent is thinking in this project"><span></span><span></span><span></span></span>';
           }

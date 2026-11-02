@@ -440,6 +440,8 @@ function createEmptyEntry(convId) {
     lastStepType: '',
     lastStepStatus: '',
     lastStepHasToolCalls: false,
+    lastStepWaitKind: '',
+    lastStepWaitDelayMs: 0,
     lastStepMs: 0,
     latestHandoffPrompt: '',
     latestHandoffMs: 0,
@@ -465,13 +467,99 @@ function createEmptyEntry(convId) {
   return entry;
 }
 
+function isTruthyArg(val) {
+  if (val === true || val === 1) return true;
+  if (typeof val === 'string') {
+    const clean = val.replace(/^["'\s]+|["'\s]+$/g, '').toLowerCase();
+    return clean === 'true' || clean === '1';
+  }
+  return false;
+}
+
+function classifyToolCallsWait(toolCalls) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+    return { kind: '', delayMs: 0 };
+  }
+  let bestKind = '';
+  let bestDelayMs = Infinity;
+
+  const pick = (kind, delayMs) => {
+    if (
+      !bestKind ||
+      delayMs < bestDelayMs ||
+      (delayMs === bestDelayMs && kind === 'permission')
+    ) {
+      bestKind = kind;
+      bestDelayMs = delayMs;
+    }
+  };
+
+  for (const tc of toolCalls) {
+    if (!tc || typeof tc !== 'object') continue;
+    const name = typeof tc.name === 'string' ? tc.name.trim() : '';
+    const args = tc.args && typeof tc.args === 'object' ? tc.args : {};
+
+    if (name === 'ask_question' || name === 'ask_user' || name === 'ask_followup_question') {
+      pick('question', 0);
+      continue;
+    }
+    if (name === 'ask_custom_permission' || name.includes('permission')) {
+      pick('permission', 0);
+      continue;
+    }
+    if (name === 'run_command') {
+      if (isTruthyArg(args.BypassSandbox)) {
+        pick('permission', 2500);
+      } else {
+        const rawWait = parseInt(String(args.WaitMsBeforeAsync ?? '').replace(/^["'\s]+|["'\s]+$/g, ''), 10);
+        const waitMs = Number.isFinite(rawWait) && rawWait > 0 ? Math.min(Math.max(rawWait, 500), 15000) : 5000;
+        pick('permission', waitMs + 2500);
+      }
+      continue;
+    }
+    if (
+      name === 'read_file' ||
+      name === 'write_file' ||
+      name === 'edit_file' ||
+      name === 'view_file' ||
+      name === 'list_dir' ||
+      name === 'delete_file'
+    ) {
+      pick('permission', 2500);
+    }
+  }
+
+  return bestKind ? { kind: bestKind, delayMs: bestDelayMs } : { kind: '', delayMs: 0 };
+}
+
+function getEntryWaitState(entry, nowMs = Date.now()) {
+  if (!entry || entry.isSubagent) return '';
+  if (entry.lastStepType !== 'PLANNER_RESPONSE' || !entry.lastStepHasToolCalls) return '';
+  const kind = entry.lastStepWaitKind || '';
+  if (kind !== 'permission' && kind !== 'question') return '';
+  const lastAct = Math.max(entry.mtimeMs || 0, entry.lastStepMs || 0, entry.lastActiveMs || 0);
+  if (!lastAct) return '';
+  const elapsed = nowMs - lastAct;
+  if (elapsed > 12 * 60 * 60 * 1000) return '';
+  const delayMs = typeof entry.lastStepWaitDelayMs === 'number' ? entry.lastStepWaitDelayMs : 0;
+  if (elapsed < delayMs) return '';
+  return kind;
+}
+
 function isEntryThinking(entry, nowMs = Date.now()) {
   if (!entry || entry.isSubagent) return false;
+  if (getEntryWaitState(entry, nowMs)) return false;
   const lastAct = Math.max(entry.mtimeMs || 0, entry.lastStepMs || 0, entry.lastActiveMs || 0);
   if (!lastAct || nowMs - lastAct > 180000) return false;
   if (entry.awaitingHandoffResponse) return true;
   if (entry.lastStepStatus === 'RUNNING') return true;
-  if (entry.lastStepType === 'USER_INPUT' || entry.lastStepType === 'GENERIC') return true;
+  if (
+    entry.lastStepType === 'USER_INPUT' ||
+    entry.lastStepType === 'GENERIC' ||
+    entry.lastStepType === 'SYSTEM_MESSAGE'
+  ) {
+    return true;
+  }
   if (entry.lastStepType === 'PLANNER_RESPONSE' && entry.lastStepHasToolCalls) return true;
   return false;
 }
@@ -506,6 +594,8 @@ function processTranscriptLine(entry, line, isFirstLine) {
       ? 'RUNNING'
       : (line.includes('"status":"ERROR"') ? 'ERROR' : 'DONE');
     entry.lastStepHasToolCalls = false;
+    entry.lastStepWaitKind = '';
+    entry.lastStepWaitDelayMs = 0;
     const tsMatch = /"created_at"\s*:\s*"([^"]+)"/.exec(line);
     if (tsMatch) {
       const tsMs = Date.parse(tsMatch[1]);
@@ -527,6 +617,8 @@ function processTranscriptLine(entry, line, isFirstLine) {
     entry.lastStepType = 'ERROR_MESSAGE';
     entry.lastStepStatus = 'ERROR';
     entry.lastStepHasToolCalls = false;
+    entry.lastStepWaitKind = '';
+    entry.lastStepWaitDelayMs = 0;
     return false;
   }
 
@@ -576,6 +668,8 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.lastStepType = 'USER_INPUT';
       entry.lastStepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
       entry.lastStepHasToolCalls = false;
+      entry.lastStepWaitKind = '';
+      entry.lastStepWaitDelayMs = 0;
       if (createdMs > 0) {
         entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
       }
@@ -607,9 +701,12 @@ function processTranscriptLine(entry, line, isFirstLine) {
     const hasTools = Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0;
     const stepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
     const wasAwaitingHandoff = Boolean(entry.awaitingHandoffResponse);
+    const waitSpec = hasTools ? classifyToolCallsWait(obj.tool_calls) : { kind: '', delayMs: 0 };
     entry.lastStepType = 'PLANNER_RESPONSE';
     entry.lastStepStatus = stepStatus;
     entry.lastStepHasToolCalls = hasTools;
+    entry.lastStepWaitKind = waitSpec.kind;
+    entry.lastStepWaitDelayMs = waitSpec.delayMs;
     if (createdMs > 0) {
       entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
     }
@@ -751,6 +848,14 @@ function processTranscriptLine(entry, line, isFirstLine) {
   }
 
   if (type === 'GENERIC' || type === 'SYSTEM_MESSAGE') {
+    entry.lastStepType = type === 'GENERIC' ? 'GENERIC' : 'SYSTEM_MESSAGE';
+    entry.lastStepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
+    entry.lastStepHasToolCalls = false;
+    entry.lastStepWaitKind = '';
+    entry.lastStepWaitDelayMs = 0;
+    if (createdMs > 0) {
+      entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
+    }
     if (type === 'GENERIC' && hasSubagentCreation) {
       const m = CHILD_CONV_RE.exec(content);
       if (m && UUID_RE.test(m[1])) {
@@ -1958,7 +2063,7 @@ class ContextHealthServer {
     if (isFile(this.indexCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.indexCachePath, 'utf-8'));
-        if (raw && raw.version === 13 && Array.isArray(raw.entries)) {
+        if (raw && raw.version === 14 && Array.isArray(raw.entries)) {
           for (const item of raw.entries) {
             if (item && typeof item.id === 'string') {
               item.lastUserInputMs = item.lastUserInputMs || 0;
@@ -1969,6 +2074,8 @@ class ContextHealthServer {
               item.lastStepType = item.lastStepType || '';
               item.lastStepStatus = item.lastStepStatus || '';
               item.lastStepHasToolCalls = Boolean(item.lastStepHasToolCalls);
+              item.lastStepWaitKind = item.lastStepWaitKind || '';
+              item.lastStepWaitDelayMs = item.lastStepWaitDelayMs || 0;
               item.lastStepMs = item.lastStepMs || 0;
               item.modelEnum = item.modelEnum || '';
               item.modelLabel = item.modelLabel || '';
@@ -1993,7 +2100,7 @@ class ContextHealthServer {
     this.indexCacheDirty = false;
     try {
       const entries = [...this.convCache.values()];
-      writeJsonAtomic(this.indexCachePath, { version: 13, savedAt: Date.now(), entries });
+      writeJsonAtomic(this.indexCachePath, { version: 14, savedAt: Date.now(), entries });
     } catch {}
   }
 
@@ -2619,6 +2726,7 @@ class ContextHealthServer {
             mainChecked < 8 ||
             now - (entry.lastActiveMs || 0) < 15 * 60 * 1000 ||
             isEntryThinking(entry, now) ||
+            Boolean(getEntryWaitState(entry, now)) ||
             entry.awaitingHandoffResponse ||
             entry.needsFullHandoffRead;
           if (isHot) {
@@ -3535,7 +3643,8 @@ class ContextHealthServer {
       ? matchedProj.name
       : getWorkspaceLabel(effectiveWsPath);
 
-    const isThinking = isEntryThinking(entry);
+    const waitState = getEntryWaitState(entry);
+    const isThinking = !waitState && isEntryThinking(entry);
     const seenBaselineMs = Math.max(
       entry.lastSeenMs || 0,
       entry.lastViewMs || 0,
@@ -3543,6 +3652,7 @@ class ContextHealthServer {
     );
     const unread = Boolean(
       !isThinking &&
+      !waitState &&
       (((entry.lastModelResponseMs || 0) > 0 && (entry.lastModelResponseMs || 0) > seenBaselineMs) ||
         entry.markedAsUnread)
     );
@@ -3583,6 +3693,7 @@ class ContextHealthServer {
       lastModelResponse: entry.lastModelResponse || '',
       lastModelResponseMs: entry.lastModelResponseMs || 0,
       isThinking,
+      waitState,
       unread,
       modelEnum: entry.modelEnum || '',
       modelLabel: entry.modelLabel || this.lookupModelLabel(entry.modelEnum) || '',
@@ -3626,7 +3737,7 @@ class ContextHealthServer {
     const viewedConvId = (query.viewedConvId || '').trim().toLowerCase();
     if (UUID_RE.test(viewedConvId)) {
       const viewedEntry = this.convCache.get(viewedConvId);
-      if (viewedEntry && !isEntryThinking(viewedEntry)) {
+      if (viewedEntry && !isEntryThinking(viewedEntry) && !getEntryWaitState(viewedEntry)) {
         this.markConversationSeen(viewedConvId);
       }
     }
@@ -3648,7 +3759,12 @@ class ContextHealthServer {
       for (let i = 0; i < this.cachedCardsState.cards.length; i++) {
         const c = this.cachedCardsState.cards[i];
         const e = this.cachedCardsState.visibleEntries[i];
-        if (c && e && Boolean(c.isThinking) !== isEntryThinking(e, checkNowMs)) {
+        if (
+          c &&
+          e &&
+          (Boolean(c.isThinking) !== isEntryThinking(e, checkNowMs) ||
+            (c.waitState || '') !== getEntryWaitState(e, checkNowMs))
+        ) {
           this.cachedCardsState = null;
           break;
         }
@@ -3808,6 +3924,7 @@ class ContextHealthServer {
           c.lastModelResponse,
           c.lastModelResponseMs,
           c.isThinking,
+          c.waitState,
           c.unread,
           c.git.commitsBehind
         ])
@@ -4437,6 +4554,9 @@ module.exports = {
   resolveLanguageServerBinary,
   scanBinarySymbols,
   updateTranscriptEntry,
+  classifyToolCallsWait,
+  getEntryWaitState,
+  isEntryThinking,
   classifyPollution,
   computeMedian,
   normalizeWorkspacePath,
