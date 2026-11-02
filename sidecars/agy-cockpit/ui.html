@@ -3968,15 +3968,15 @@
           const card = state.conversations.find((c) => c.id === pending.convId);
           const hState = getHandoffState(pending.convId);
           hState.step = 'focus';
-          hState.cancelledPending = true;
-          hState.dismissedHandoffMs = Math.max(
-            hState.dismissedHandoffMs || 0,
-            hState.loadedHandoffMs || 0,
-            pending.baselineHandoffMs || 0,
-            (card && Number(card.latestHandoffMs)) || 0,
-            Date.now()
-          );
           if (abortRemote) {
+            hState.cancelledPending = true;
+            hState.dismissedHandoffMs = Math.max(
+              hState.dismissedHandoffMs || 0,
+              hState.loadedHandoffMs || 0,
+              pending.baselineHandoffMs || 0,
+              (card && Number(card.latestHandoffMs)) || 0,
+              Date.now()
+            );
             apiFetch('/api/cancel-invocation', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -4055,9 +4055,18 @@
               if (res && res.error) {
                 throw new Error(res.error);
               }
-              showToast('Agent is drafting smart handoff...');
+              if (state.pendingSmartHandoff && state.pendingSmartHandoff.convId === convId) {
+                showToast('Agent is drafting smart handoff...');
+              }
               return;
             } catch (agentErr) {
+              if (!state.pendingSmartHandoff || state.pendingSmartHandoff.convId !== convId) {
+                return;
+              }
+              const latestCard = state.conversations.find((c) => c.id === convId);
+              if (latestCard && latestCard.isThinking) {
+                return;
+              }
               cancelPendingSmartHandoff(false);
               console.warn('[AgyCockpit] agent sendMessage failed:', agentErr);
               showToast('Agent unavailable: ' + agentErr.message);

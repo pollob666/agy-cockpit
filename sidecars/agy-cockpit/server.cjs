@@ -948,6 +948,12 @@ function createEmptyEntry(convId) {
     mtimeMs: 0,
     size: 0,
     parsedBytes: 0,
+    lastLineOffset: 0,
+    lastParsedStepIndex: -1,
+    lastPlannerStepTok: null,
+    lastHandoffStepIndex: -1,
+    lastHandoffCompletedStepIndex: -1,
+    handoffUpdatedInPass: false,
     lastActiveIso: '',
     lastActiveMs: 0,
     lastUserInputMs: 0,
@@ -1165,6 +1171,9 @@ function processTranscriptLine(entry, line, isFirstLine) {
     return false;
   }
 
+  const stepIdx = typeof obj.step_index === 'number' ? obj.step_index : -1;
+  const isRepeatStep = stepIdx >= 0 && stepIdx === entry.lastParsedStepIndex;
+
   const createdAt = typeof obj.created_at === 'string' ? obj.created_at : '';
   const createdMs = createdAt ? Date.parse(createdAt) : 0;
 
@@ -1194,6 +1203,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
     const clean = cleanUserPrompt(content);
     if (clean) {
       if (clean.startsWith('[AGY Cockpit Smart Handoff]') || clean.startsWith('[Context Health Smart Handoff]')) {
+        if (stepIdx >= 0) entry.lastParsedStepIndex = stepIdx;
         entry.awaitingHandoffResponse = true;
         return false;
       }
@@ -1216,19 +1226,23 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.awaitingHandoffResponse = false;
       entry.needsFullHandoffRead = false;
       entry.handoffTargetStepIndex = -1;
-      entry.promptCount += 1;
-      entry.promptsSinceLastCompact += 1;
-      if (!entry.firstPrompt) entry.firstPrompt = clean.slice(0, 500);
-      entry.lastPrompt = clean.slice(0, 500);
-      entry.prompts.push({
-        index: entry.promptCount,
-        createdAt,
-        text: clean.slice(0, 4000)
-      });
-      if (entry.prompts.length > 60) {
-        entry.prompts.splice(0, entry.prompts.length - 60);
+      if (!isRepeatStep) {
+        if (stepIdx >= 0) entry.lastParsedStepIndex = stepIdx;
+        entry.promptCount += 1;
+        entry.promptsSinceLastCompact += 1;
+        if (!entry.firstPrompt) entry.firstPrompt = clean.slice(0, 500);
+        entry.lastPrompt = clean.slice(0, 500);
+        entry.prompts.push({
+          index: entry.promptCount,
+          createdAt,
+          text: clean.slice(0, 4000)
+        });
+        if (entry.prompts.length > 60) {
+          entry.prompts.splice(0, entry.prompts.length - 60);
+        }
+        return true;
       }
-      return true;
+      return false;
     }
     return false;
   }
@@ -1240,7 +1254,12 @@ function processTranscriptLine(entry, line, isFirstLine) {
     }
     const hasTools = Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0;
     const stepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
-    const wasAwaitingHandoff = Boolean(entry.awaitingHandoffResponse);
+    if (entry.awaitingHandoffResponse && stepIdx >= 0) {
+      entry.lastHandoffStepIndex = stepIdx;
+    }
+    const wasAwaitingHandoff = Boolean(
+      entry.awaitingHandoffResponse || (stepIdx >= 0 && entry.lastHandoffStepIndex === stepIdx)
+    );
     const waitSpec = hasTools ? classifyToolCallsWait(obj.tool_calls) : { kind: '', delayMs: 0, toolName: '' };
     entry.lastStepType = 'PLANNER_RESPONSE';
     entry.lastStepStatus = stepStatus;
@@ -1264,13 +1283,23 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.lastPlannerTokens = totalTok;
       entry.currentTokens = totalTok;
     }
-    const stepTotalTok = totalTok + outTok;
-    if (stepTotalTok > 0) {
-      entry.totalInputTokens = (entry.totalInputTokens || 0) + inTok;
-      entry.totalCacheReadTokens = (entry.totalCacheReadTokens || 0) + cacheTok;
-      entry.totalOutputTokens = (entry.totalOutputTokens || 0) + outTok;
+    const prevTok = (isRepeatStep && entry.lastPlannerStepTok)
+      ? entry.lastPlannerStepTok
+      : { inTok: 0, cacheTok: 0, outTok: 0 };
+    const effInTok = inTok > 0 ? inTok : prevTok.inTok;
+    const effCacheTok = cacheTok > 0 ? cacheTok : prevTok.cacheTok;
+    const effOutTok = outTok > 0 ? outTok : prevTok.outTok;
+    const deltaIn = effInTok - prevTok.inTok;
+    const deltaCache = effCacheTok - prevTok.cacheTok;
+    const deltaOut = effOutTok - prevTok.outTok;
+    if (deltaIn !== 0 || deltaCache !== 0 || deltaOut !== 0) {
+      entry.totalInputTokens = Math.max(0, (entry.totalInputTokens || 0) + deltaIn);
+      entry.totalCacheReadTokens = Math.max(0, (entry.totalCacheReadTokens || 0) + deltaCache);
+      entry.totalOutputTokens = Math.max(0, (entry.totalOutputTokens || 0) + deltaOut);
       entry.totalTokens = entry.totalInputTokens + entry.totalCacheReadTokens + entry.totalOutputTokens;
     }
+    entry.lastPlannerStepTok = { inTok: effInTok, cacheTok: effCacheTok, outTok: effOutTok };
+
     let isHandoffStep = false;
     if (content && content.trim()) {
       const trimmedContent = content.trim();
@@ -1280,28 +1309,41 @@ function processTranscriptLine(entry, line, isFirstLine) {
       const handoffMatch = /<HANDOFF_PROMPT>\s*([\s\S]*?)\s*<\/HANDOFF_PROMPT>/i.exec(trimmedContent);
       if (handoffMatch && handoffMatch[1].trim() && !isTruncatedContent) {
         isHandoffStep = true;
-        entry.latestHandoffPrompt = handoffMatch[1].trim();
-        entry.latestHandoffMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
+        const nextHandoff = handoffMatch[1].trim();
+        if (nextHandoff !== entry.latestHandoffPrompt || entry.lastHandoffCompletedStepIndex !== stepIdx) {
+          entry.latestHandoffPrompt = nextHandoff;
+          entry.latestHandoffMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
+          entry.lastHandoffCompletedStepIndex = stepIdx;
+          entry.handoffUpdatedInPass = true;
+        }
         entry.awaitingHandoffResponse = false;
         entry.needsFullHandoffRead = false;
         entry.handoffTargetStepIndex = -1;
       } else if (
         isTruncatedContent &&
         (/<HANDOFF_PROMPT>/i.test(trimmedContent) ||
-          (entry.awaitingHandoffResponse && (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)))
+          (wasAwaitingHandoff && (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)))
       ) {
         isHandoffStep = true;
-        entry.needsFullHandoffRead = true;
-        entry.handoffTargetStepIndex = typeof obj.step_index === 'number' ? obj.step_index : -1;
-        entry.handoffPendingMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
+        if (entry.lastHandoffCompletedStepIndex !== stepIdx || entry.needsFullHandoffRead) {
+          entry.needsFullHandoffRead = true;
+          entry.handoffTargetStepIndex = stepIdx;
+          entry.handoffPendingMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
+        }
         entry.awaitingHandoffResponse = false;
       } else if (
-        entry.awaitingHandoffResponse &&
+        wasAwaitingHandoff &&
+        stepStatus !== 'RUNNING' &&
+        !/<HANDOFF_PROMPT>/i.test(trimmedContent) &&
         (!Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0)
       ) {
         isHandoffStep = true;
-        entry.latestHandoffPrompt = trimmedContent;
-        entry.latestHandoffMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
+        if (trimmedContent !== entry.latestHandoffPrompt || entry.lastHandoffCompletedStepIndex !== stepIdx) {
+          entry.latestHandoffPrompt = trimmedContent;
+          entry.latestHandoffMs = Math.max(createdMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
+          entry.lastHandoffCompletedStepIndex = stepIdx;
+          entry.handoffUpdatedInPass = true;
+        }
         entry.awaitingHandoffResponse = false;
         entry.needsFullHandoffRead = false;
         entry.handoffTargetStepIndex = -1;
@@ -1337,38 +1379,44 @@ function processTranscriptLine(entry, line, isFirstLine) {
           entry.pendingSubagentRoles.push(typeof role === 'string' ? cleanTranscriptArgString(role).trim() : '');
         }
       }
-      const rawPaths = extractPathsFromToolCalls(obj.tool_calls);
-      for (const rp of rawPaths) {
-        const root = findGitOrWorkspaceRoot(rp);
-        if (root) {
-          const nextCount = (entry.workspaceCounts[root] || 0) + 1;
-          entry.workspaceCounts[root] = nextCount;
-          const curBest = entry.workspacePath ? (entry.workspaceCounts[entry.workspacePath] || 0) : 0;
-          if (!entry.workspacePath || nextCount >= curBest) {
-            entry.workspacePath = root;
+      if (!isRepeatStep) {
+        const rawPaths = extractPathsFromToolCalls(obj.tool_calls);
+        for (const rp of rawPaths) {
+          const root = findGitOrWorkspaceRoot(rp);
+          if (root) {
+            const nextCount = (entry.workspaceCounts[root] || 0) + 1;
+            entry.workspaceCounts[root] = nextCount;
+            const curBest = entry.workspacePath ? (entry.workspaceCounts[entry.workspacePath] || 0) : 0;
+            if (!entry.workspacePath || nextCount >= curBest) {
+              entry.workspacePath = root;
+            }
+            break;
           }
-          break;
         }
       }
     }
+    if (stepIdx >= 0) entry.lastParsedStepIndex = stepIdx;
     return false;
   }
 
   if (type === 'CHECKPOINT') {
-    entry.compactCount += 1;
+    if (!isRepeatStep) {
+      if (stepIdx >= 0) entry.lastParsedStepIndex = stepIdx;
+      entry.compactCount += 1;
+      entry.promptsSinceLastCompact = 0;
+      if (entry.lastPlannerTokens > 0) {
+        entry.compactTriggerTokens.push(entry.lastPlannerTokens);
+        if (entry.compactTriggerTokens.length > 25) {
+          entry.compactTriggerTokens.shift();
+        }
+      }
+    }
     if (createdAt) {
       entry.lastCompactMs = createdMs || entry.lastActiveMs;
     }
     if (createdAt && createdMs >= entry.lastActiveMs) {
       entry.lastActiveIso = createdAt;
       entry.lastActiveMs = createdMs;
-    }
-    entry.promptsSinceLastCompact = 0;
-    if (entry.lastPlannerTokens > 0) {
-      entry.compactTriggerTokens.push(entry.lastPlannerTokens);
-      if (entry.compactTriggerTokens.length > 25) {
-        entry.compactTriggerTokens.shift();
-      }
     }
     const truncMatch = /<truncated\s+(\d+)\s+bytes>/i.exec(content);
     const extraBytes = truncMatch ? (parseInt(truncMatch[1], 10) || 0) : 0;
@@ -1383,7 +1431,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
       content.includes('\n<truncated ');
     if (isTruncatedContent) {
       entry.needsFullCheckpointRead = true;
-      entry.checkpointTargetStepIndex = typeof obj.step_index === 'number' ? obj.step_index : -1;
+      entry.checkpointTargetStepIndex = stepIdx;
     } else {
       entry.needsFullCheckpointRead = false;
       entry.checkpointTargetStepIndex = -1;
@@ -1408,7 +1456,9 @@ function processTranscriptLine(entry, line, isFirstLine) {
     }
     if (type === 'GENERIC' && hasSubagentCreation) {
       const m = CHILD_CONV_RE.exec(content);
-      const role = Array.isArray(entry.pendingSubagentRoles) ? entry.pendingSubagentRoles.shift() : '';
+      const role = (!isRepeatStep && Array.isArray(entry.pendingSubagentRoles))
+        ? entry.pendingSubagentRoles.shift()
+        : '';
       if (m && UUID_RE.test(m[1])) {
         const childId = m[1].toLowerCase();
         if (childId !== entry.id && !entry.spawnedSubagentIds.includes(childId)) {
@@ -1430,6 +1480,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
     if (content.includes('[')) {
       extractMentionedCommits(entry, content);
     }
+    if (stepIdx >= 0) entry.lastParsedStepIndex = stepIdx;
   }
   return false;
 }
@@ -1634,7 +1685,10 @@ function resolveFullHandoffPrompt(entry, transcriptPath) {
   }
 
   if (found) {
-    entry.latestHandoffMs = Math.max(entry.handoffPendingMs || Date.now(), (entry.latestHandoffMs || 0) + 1);
+    const targetStep = typeof entry.handoffTargetStepIndex === 'number' ? entry.handoffTargetStepIndex : -1;
+    entry.lastHandoffCompletedStepIndex = targetStep;
+    entry.handoffUpdatedInPass = true;
+    entry.latestHandoffMs = Math.max(entry.handoffPendingMs || Date.now(), (entry.latestHandoffMs || 0) + 1, Date.now());
     entry.needsFullHandoffRead = false;
     entry.handoffTargetStepIndex = -1;
     return true;
@@ -1645,6 +1699,17 @@ function resolveFullHandoffPrompt(entry, transcriptPath) {
     entry.handoffTargetStepIndex = -1;
   }
   return false;
+}
+
+function copyPreservedEntryMeta(target, src) {
+  if (!target || !src) return;
+  target.modelEnum = src.modelEnum || '';
+  target.modelLabel = src.modelLabel || '';
+  target.modelResolvedMtimeMs = src.modelResolvedMtimeMs || 0;
+  target.workspacePath = src.workspacePath || '';
+  target.lastViewMs = src.lastViewMs || 0;
+  target.lastUserInputMs = src.lastUserInputMs || 0;
+  target.lastSeenMs = src.lastSeenMs || 0;
 }
 
 function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
@@ -1670,24 +1735,27 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
     return { entry: existingEntry, changed: false };
   }
 
-  const canIncremental =
+  const lastLineOffset =
+    existingEntry &&
+    typeof existingEntry.lastLineOffset === 'number' &&
+    existingEntry.lastLineOffset >= 0 &&
+    existingEntry.lastLineOffset <= existingEntry.parsedBytes
+      ? existingEntry.lastLineOffset
+      : 0;
+
+  let canIncremental =
     existingEntry &&
     existingEntry.parsedBytes > 0 &&
-    stat.size > existingEntry.parsedBytes &&
-    stat.size - existingEntry.parsedBytes < 16 * 1024 * 1024;
+    typeof existingEntry.lastLineOffset === 'number' &&
+    stat.size > lastLineOffset &&
+    stat.size - lastLineOffset < 16 * 1024 * 1024;
 
-  const entry = canIncremental ? existingEntry : createEmptyEntry(convId);
+  let entry = canIncremental ? existingEntry : createEmptyEntry(convId);
   if (!canIncremental && existingEntry) {
-    entry.modelEnum = existingEntry.modelEnum || '';
-    entry.modelLabel = existingEntry.modelLabel || '';
-    entry.modelResolvedMtimeMs = existingEntry.modelResolvedMtimeMs || 0;
-    entry.workspacePath = existingEntry.workspacePath || '';
-    entry.lastViewMs = existingEntry.lastViewMs || 0;
-    entry.lastUserInputMs = existingEntry.lastUserInputMs || 0;
-    entry.lastSeenMs = existingEntry.lastSeenMs || 0;
+    copyPreservedEntryMeta(entry, existingEntry);
   }
-  const startOffset = canIncremental ? entry.parsedBytes : 0;
-  const bytesToRead = stat.size - startOffset;
+  let startOffset = canIncremental ? lastLineOffset : 0;
+  let bytesToRead = stat.size - startOffset;
 
   if (bytesToRead <= 0) {
     if (existingEntry) {
@@ -1704,9 +1772,28 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
   let buf;
   try {
     fd = fs.openSync(transcriptPath, 'r');
-    buf = Buffer.allocUnsafe(bytesToRead);
-    const bytesRead = fs.readSync(fd, buf, 0, bytesToRead, startOffset);
-    buf = buf.subarray(0, bytesRead);
+    if (canIncremental && startOffset > 0) {
+      const probeLen = bytesToRead + 1;
+      const probeBuf = Buffer.allocUnsafe(probeLen);
+      const probeRead = fs.readSync(fd, probeBuf, 0, probeLen, startOffset - 1);
+      const slice = probeBuf.subarray(0, probeRead);
+      if (slice.length < 2 || slice[0] !== 0x0a || slice[1] !== 0x7b) {
+        canIncremental = false;
+        entry = createEmptyEntry(convId);
+        copyPreservedEntryMeta(entry, existingEntry);
+        startOffset = 0;
+        bytesToRead = stat.size;
+        buf = Buffer.allocUnsafe(bytesToRead);
+        const fullRead = fs.readSync(fd, buf, 0, bytesToRead, 0);
+        buf = buf.subarray(0, fullRead);
+      } else {
+        buf = slice.subarray(1);
+      }
+    } else {
+      buf = Buffer.allocUnsafe(bytesToRead);
+      const bytesRead = fs.readSync(fd, buf, 0, bytesToRead, startOffset);
+      buf = buf.subarray(0, bytesRead);
+    }
   } catch {
     return existingEntry ? { entry: existingEntry, changed: false } : null;
   } finally {
@@ -1739,6 +1826,7 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
   const text = completeBuf.toString('utf-8');
   const lines = text.split('\n');
 
+  entry.handoffUpdatedInPass = false;
   let isFirstLine = startOffset === 0;
   let corpusDirty = startOffset === 0;
   for (let i = 0; i < lines.length; i++) {
@@ -1760,6 +1848,19 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
     resolveFullHandoffPrompt(entry, transcriptPath);
   }
 
+  if (entry.handoffUpdatedInPass && startOffset > 0) {
+    entry.latestHandoffMs = Math.max(entry.latestHandoffMs || 0, Math.floor(stat.mtimeMs || 0), Date.now());
+  }
+  entry.handoffUpdatedInPass = false;
+
+  let endPos = completeBuf.length;
+  while (endPos > 0 && (completeBuf[endPos - 1] === 0x0a || completeBuf[endPos - 1] === 0x0d)) {
+    endPos--;
+  }
+  if (endPos > 0) {
+    const prevNlIdx = completeBuf.lastIndexOf(0x0a, endPos - 1);
+    entry.lastLineOffset = startOffset + (prevNlIdx >= 0 ? prevNlIdx + 1 : 0);
+  }
   entry.parsedBytes = lastNewlineIdx >= 0 ? startOffset + lastNewlineIdx + 1 : stat.size;
   entry.size = stat.size;
   entry.mtimeMs = stat.mtimeMs;
@@ -2916,9 +3017,15 @@ class AgyCockpitServer {
     if (isFile(this.indexCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.indexCachePath, 'utf-8'));
-        if (raw && raw.version === 15 && Array.isArray(raw.entries)) {
+        if (raw && raw.version === 16 && Array.isArray(raw.entries)) {
           for (const item of raw.entries) {
             if (item && typeof item.id === 'string') {
+              item.lastLineOffset = typeof item.lastLineOffset === 'number' ? item.lastLineOffset : 0;
+              item.lastParsedStepIndex = typeof item.lastParsedStepIndex === 'number' ? item.lastParsedStepIndex : -1;
+              item.lastPlannerStepTok = item.lastPlannerStepTok && typeof item.lastPlannerStepTok === 'object' ? item.lastPlannerStepTok : null;
+              item.lastHandoffStepIndex = typeof item.lastHandoffStepIndex === 'number' ? item.lastHandoffStepIndex : -1;
+              item.lastHandoffCompletedStepIndex = typeof item.lastHandoffCompletedStepIndex === 'number' ? item.lastHandoffCompletedStepIndex : -1;
+              item.handoffUpdatedInPass = false;
               item.lastUserInputMs = item.lastUserInputMs || 0;
               item.lastSeenMs = item.lastSeenMs || 0;
               item.markedAsUnread = Boolean(item.markedAsUnread);
@@ -2955,7 +3062,7 @@ class AgyCockpitServer {
     this.indexCacheDirty = false;
     try {
       const entries = [...this.convCache.values()];
-      writeJsonAtomic(this.indexCachePath, { version: 15, savedAt: Date.now(), entries });
+      writeJsonAtomic(this.indexCachePath, { version: 16, savedAt: Date.now(), entries });
     } catch {}
   }
 
@@ -5539,6 +5646,21 @@ class AgyCockpitServer {
         return;
       }
       const cleanConvId = convId.toLowerCase();
+      const transcriptPath = path.join(this.brainDir, cleanConvId, '.system_generated', 'logs', 'transcript.jsonl');
+      let preSendSize = 0;
+      let preSendMtimeMs = 0;
+      try {
+        const st = fs.statSync(transcriptPath, { throwIfNoEntry: false });
+        if (st) {
+          preSendSize = st.size || 0;
+          preSendMtimeMs = st.mtimeMs || 0;
+        }
+      } catch {}
+      const preTarget = this.convCache.get(cleanConvId);
+      if (preTarget && isSmartHandoffRequestText(message)) {
+        preTarget.awaitingHandoffResponse = true;
+        this.markTranscriptDirty({ resetSummary: true, saveIndex: false });
+      }
       const markSentSuccess = () => {
         const target = this.convCache.get(cleanConvId);
         if (target) {
@@ -5559,11 +5681,24 @@ class AgyCockpitServer {
           metadata: {},
           clientType: 'CHAT_CLIENT_REQUEST_STREAM_CLIENT_TYPE_IDE'
         },
-        12000
+        45000
       );
       if (sendRpc && !sendRpc.error) {
         markSentSuccess();
         sendJson(res, 200, { response: sendRpc });
+        return;
+      }
+      let acceptedOnDisk = false;
+      try {
+        const postSt = fs.statSync(transcriptPath, { throwIfNoEntry: false });
+        if (postSt && (postSt.size > preSendSize || postSt.mtimeMs > preSendMtimeMs)) {
+          acceptedOnDisk = true;
+        }
+      } catch {}
+      if (acceptedOnDisk) {
+        this.refreshSingleEntry(cleanConvId);
+        markSentSuccess();
+        sendJson(res, 200, { response: { ok: true, acceptedOnTranscript: true } });
         return;
       }
       this.refreshProjectsRegistry(false);
