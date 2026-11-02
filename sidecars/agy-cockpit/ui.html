@@ -336,6 +336,229 @@
       gap: 6px;
     }
 
+    .meter-group[data-action="open-context-modal"] {
+      cursor: pointer;
+      border-radius: 6px;
+      padding: 5px 7px;
+      margin: -5px -7px;
+      transition: background 0.12s;
+    }
+
+    .meter-group[data-action="open-context-modal"]:hover {
+      background: rgba(255, 255, 255, 0.035);
+    }
+
+    .meter-group[data-action="open-context-modal"]:hover .context-meter-val {
+      color: #93c5fd;
+      text-decoration: underline;
+      text-decoration-color: rgba(147, 197, 253, 0.45);
+      text-underline-offset: 2px;
+    }
+
+    .modal-card.ctx-modal-card {
+      max-width: 400px;
+      gap: 9px;
+    }
+
+    .ctx-modal-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .ctx-modal-title-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .ctx-modal-sub {
+      font-size: 11.5px;
+      color: var(--muted-foreground, #888888);
+    }
+
+    .ctx-modal-pill {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--foreground, #ededed);
+      background: var(--secondary, rgba(255, 255, 255, 0.07));
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.13));
+      border-radius: 999px;
+      padding: 2px 8px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .ctx-modal-scroll {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 66vh;
+      overflow-y: auto;
+      padding-right: 2px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+    }
+
+    .ctx-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px 10px;
+      background: var(--background, #0a0a0a);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+      border-radius: 6px;
+    }
+
+    .ctx-section-title {
+      font-size: 11.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted-foreground, #999999);
+    }
+
+    .ctx-split-bar {
+      display: flex;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--secondary, rgba(255, 255, 255, 0.08));
+      overflow: hidden;
+      gap: 1px;
+    }
+
+    .ctx-split-seg {
+      height: 100%;
+      transition: width 0.2s ease;
+    }
+
+    .ctx-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      min-width: 0;
+    }
+
+    .ctx-row-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .ctx-row-label {
+      color: var(--foreground, #ededed);
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+
+    .ctx-row-val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      color: var(--foreground, #ededed);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .ctx-row-sub {
+      font-size: 11px;
+      color: var(--muted-foreground, #777777);
+      line-height: 1.35;
+    }
+
+    .ctx-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .ctx-tool-badge {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10.5px;
+      font-weight: 500;
+      color: #93c5fd;
+      background: rgba(59, 130, 246, 0.14);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: 4px;
+      padding: 0 5px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .ctx-skill-badge {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      font-weight: 500;
+      color: #6ee7b7;
+      background: rgba(16, 185, 129, 0.13);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      border-radius: 4px;
+      padding: 1px 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 190px;
+    }
+
+    .ctx-compacted-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 2px;
+    }
+
+    .ctx-compacted-pill {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10.5px;
+      color: var(--muted-foreground, #888888);
+      background: var(--secondary, rgba(255, 255, 255, 0.05));
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+      border-radius: 4px;
+      padding: 1px 6px;
+    }
+
+    .ctx-cat-block {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .ctx-cat-bar {
+      height: 4px;
+      border-radius: 999px;
+      background: var(--secondary, rgba(255, 255, 255, 0.07));
+      overflow: hidden;
+    }
+
+    .ctx-cat-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: #60a5fa;
+    }
+
+    .ctx-rank {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      color: var(--muted-foreground, #777777);
+      width: 18px;
+      flex-shrink: 0;
+    }
+
+    .ctx-empty-note {
+      font-size: 11.5px;
+      color: var(--muted-foreground, #777777);
+    }
+
     .meter-head {
       display: flex;
       align-items: center;
@@ -626,8 +849,8 @@
 
     .new-chat-textarea {
       width: 100%;
-      min-height: 68px;
-      max-height: 220px;
+      min-height: 110px;
+      max-height: 260px;
       resize: vertical;
       background: var(--card, #141414);
       color: var(--foreground, #ededed);
@@ -976,8 +1199,7 @@
       z-index: 9400;
     }
 
-    .ctx-menu-sep,
-    .card-menu-sep {
+    .ctx-menu-sep {
       height: 1px;
       background: var(--border, rgba(255, 255, 255, 0.12));
       margin: 3px 2px;
@@ -1604,6 +1826,12 @@
         quota: null,
         quotaActiveKey: '',
         quotaModalTimer: null,
+        activeContextModalConvId: null,
+        contextModalReqSeq: 0,
+        contextModalData: null,
+        contextModalLoading: false,
+        contextModalError: '',
+        contextModalLastSig: '',
         activeWorkspaceKey: '',
         searchMatches: null,
         diagnostics: null,
@@ -1682,6 +1910,14 @@
         if (tok >= 1000000) return (tok / 1000000).toFixed(2) + 'M';
         if (tok >= 1000) return (tok / 1000).toFixed(1) + 'k';
         return String(tok);
+      }
+
+      function formatBytes(bytes) {
+        const b = Number(bytes) || 0;
+        if (b <= 0) return '0 B';
+        if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(2) + ' MB';
+        if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+        return b + ' B';
       }
 
       async function copyTextToClipboard(text) {
@@ -1947,6 +2183,8 @@
 
       async function openQuotaModal() {
         if (!modalBackdropEl) return;
+        state.activeContextModalConvId = null;
+        state.contextModalReqSeq += 1;
         modalBackdropEl.innerHTML = renderQuotaModalHtml();
         modalBackdropEl.classList.add('open');
         stopQuotaModalTimer();
@@ -1966,6 +2204,333 @@
             renderAll();
           }
         } catch {}
+      }
+
+      function isContextBreakdownModalOpen() {
+        return Boolean(
+          modalBackdropEl &&
+          modalBackdropEl.classList.contains('open') &&
+          state.activeContextModalConvId &&
+          modalBackdropEl.querySelector('.ctx-modal-card')
+        );
+      }
+
+      function renderContextBreakdownModalHtml(convId) {
+        const card = state.conversations.find((c) => c.id === convId) || null;
+        const data = state.contextModalData && state.contextModalData.id === convId
+          ? state.contextModalData
+          : null;
+
+        if (!data) {
+          const bodyMsg = state.contextModalError
+            ? '<div class="ctx-empty-note" style="color:#f87171;">' + escapeHtml(state.contextModalError) + '</div>'
+            : '<div class="ctx-empty-note">Analyzing active context window...</div>';
+          return (
+            '<div class="modal-card ctx-modal-card" role="dialog" aria-modal="true">' +
+              '<div class="ctx-modal-head">' +
+                '<div class="ctx-modal-title-wrap">' +
+                  '<div class="modal-title">Context Window Breakdown</div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="ctx-section">' + bodyMsg + '</div>' +
+              '<div class="modal-actions">' +
+                '<button class="btn-secondary" data-action="close-modal">Close</button>' +
+              '</div>' +
+            '</div>'
+          );
+        }
+
+        const curTok = Number(data.currentTokens) || (card && Number(card.currentTokens)) || 0;
+        const ceilTok = Number(data.observedCeiling) || (card && Number(card.observedCeiling)) || 0;
+        const ceilExceeded = Boolean(data.ceilingExceeded || (ceilTok > 0 && curTok > ceilTok));
+        const fillPct = ceilTok > 0 && !ceilExceeded
+          ? Math.min(100, Math.round((curTok / ceilTok) * 100))
+          : 0;
+        const pillText = ceilTok > 0 && !ceilExceeded
+          ? formatTokens(curTok) + ' / ~' + formatTokens(ceilTok) + ' (' + fillPct + '%)'
+          : formatTokens(curTok) + ' tok';
+
+        const compactCount = Number(data.compactCount) || 0;
+        const activePrompts = Number(data.activePromptsCount) || 0;
+        const subText = compactCount > 0
+          ? 'Active window after Compact #' + compactCount + ' · ' + activePrompts + ' prompt' + (activePrompts === 1 ? '' : 's')
+          : 'Active window (no compactions) · ' + activePrompts + ' prompt' + (activePrompts === 1 ? '' : 's');
+
+        const baseTok = Number(data.baseTokens) || 0;
+        const growthTok = Number(data.activeGrowthTokens) || 0;
+        const cachedSysTok = Number(data.cachedSystemPrefixTokens) || 0;
+        const denomTok = Math.max(curTok, baseTok + growthTok, 1);
+        const basePct = curTok > 0 ? Math.min(100, Math.max(4, Math.round((baseTok / denomTok) * 100))) : 0;
+        const growthPct = curTok > 0 ? Math.max(0, 100 - basePct) : 0;
+
+        const baseLabel = compactCount > 0
+          ? 'Base + Compaction Summary'
+          : 'System & Rules / Initial Base';
+
+        let baseSubNote = '';
+        if (cachedSysTok > 0) {
+          if (compactCount > 0 && baseTok > cachedSysTok) {
+            baseSubNote =
+              'Cached system prefix: ' + formatTokens(cachedSysTok) + ' tok · Summary & init: ~' +
+              formatTokens(Math.max(0, baseTok - cachedSysTok)) + ' tok';
+          } else {
+            baseSubNote = 'Cached system & tools prefix: ' + formatTokens(cachedSysTok) + ' tok';
+          }
+        } else if (compactCount > 0 && data.checkpointSummaryBytes > 0) {
+          baseSubNote = 'Compaction summary payload: ' + formatBytes(data.checkpointSummaryBytes) + ' (~' + formatTokens(data.checkpointSummaryEstTokens) + ' tok)';
+        }
+
+        const activeToolCalls = Number(data.activeToolCallsCount) || 0;
+        const growthSubNote =
+          activePrompts + ' prompt' + (activePrompts === 1 ? '' : 's') + ' · ' +
+          activeToolCalls + ' tool call' + (activeToolCalls === 1 ? '' : 's') +
+          ' since ' + (compactCount > 0 ? 'last compact' : 'conversation start');
+
+        const activeSkills = Array.isArray(data.activeSkills) ? data.activeSkills : [];
+        const compactedSkills = Array.isArray(data.compactedSkills) ? data.compactedSkills : [];
+        let skillsHtml = '';
+        if (activeSkills.length === 0 && compactedSkills.length === 0) {
+          skillsHtml = '<div class="ctx-empty-note">No skills loaded in this conversation.</div>';
+        } else {
+          if (activeSkills.length > 0) {
+            for (const s of activeSkills) {
+              const filesInfo = Array.isArray(s.files) && s.files.length > 0 ? s.files.join(', ') : 'SKILL.md';
+              const metaNote = s.count > 1 ? s.count + ' reads' : filesInfo;
+              skillsHtml +=
+                '<div class="ctx-row" title="' + escapeHtml(s.name + ' (' + filesInfo + ')') + '">' +
+                  '<div class="ctx-row-left">' +
+                    '<span class="ctx-skill-badge">' + escapeHtml(s.name) + '</span>' +
+                    '<span class="ctx-row-sub">' + escapeHtml(metaNote) + '</span>' +
+                  '</div>' +
+                  '<span class="ctx-row-val">' + escapeHtml(formatBytes(s.bytes) + ' (~' + formatTokens(s.estTokens) + ' tok)') + '</span>' +
+                '</div>';
+            }
+          } else {
+            skillsHtml += '<div class="ctx-empty-note">No skills read in the active window.</div>';
+          }
+          if (compactedSkills.length > 0) {
+            skillsHtml +=
+              '<div class="ctx-row-sub" style="margin-top:2px;">Before last compact (compacted):</div>' +
+              '<div class="ctx-compacted-pills">' +
+                compactedSkills.map((s) =>
+                  '<span class="ctx-compacted-pill" title="Loaded before last compaction">' +
+                    escapeHtml(s.name + ' · ' + formatBytes(s.bytes)) +
+                  '</span>'
+                ).join('') +
+              '</div>';
+          }
+        }
+
+        const categories = Array.isArray(data.categories) ? data.categories : [];
+        const maxCatBytes = categories.reduce((acc, c) => Math.max(acc, Number(c.bytes) || 0), 0);
+        let categoriesHtml = '';
+        for (const cat of categories) {
+          const catBytes = Number(cat.bytes) || 0;
+          const catCount = Number(cat.count) || 0;
+          const barWidth = maxCatBytes > 0 && catBytes > 0
+            ? Math.max(4, Math.round((catBytes / maxCatBytes) * 100))
+            : 0;
+          const valStr = catBytes > 0
+            ? formatBytes(catBytes) + ' · ~' + formatTokens(cat.estTokens) + ' tok'
+            : '0 B';
+          categoriesHtml +=
+            '<div class="ctx-cat-block">' +
+              '<div class="ctx-row">' +
+                '<div class="ctx-row-left">' +
+                  '<span class="ctx-row-label">' + escapeHtml(cat.label) + '</span>' +
+                  '<span class="ctx-row-sub">(' + catCount + ')</span>' +
+                '</div>' +
+                '<span class="ctx-row-val">' + escapeHtml(valStr) + '</span>' +
+              '</div>' +
+              '<div class="ctx-cat-bar">' +
+                '<div class="ctx-cat-bar-fill" style="width:' + barWidth + '%;"></div>' +
+              '</div>' +
+            '</div>';
+        }
+
+        const heaviestSteps = Array.isArray(data.heaviestSteps) ? data.heaviestSteps : [];
+        let heaviestHtml = '';
+        if (heaviestSteps.length === 0) {
+          heaviestHtml = '<div class="ctx-empty-note">No tool activity in the active window yet.</div>';
+        } else {
+          for (let i = 0; i < heaviestSteps.length; i++) {
+            const st = heaviestSteps[i];
+            const tip = st.tool + ': ' + st.target + ' (' + formatBytes(st.bytes) + ')';
+            heaviestHtml +=
+              '<div class="ctx-row" title="' + escapeHtml(tip) + '">' +
+                '<div class="ctx-row-left">' +
+                  '<span class="ctx-rank">#' + (i + 1) + '</span>' +
+                  '<span class="ctx-tool-badge">' + escapeHtml(st.tool) + '</span>' +
+                  '<span class="ctx-row-label">' + escapeHtml(st.target) + '</span>' +
+                '</div>' +
+                '<span class="ctx-row-val">' + escapeHtml(formatBytes(st.bytes)) + '</span>' +
+              '</div>';
+          }
+        }
+
+        const topFiles = Array.isArray(data.topFiles) ? data.topFiles : [];
+        let topFilesSectionHtml = '';
+        if (topFiles.length > 0) {
+          let filesRows = '';
+          for (const f of topFiles) {
+            const countsParts = [];
+            if (f.readCount > 0) countsParts.push(f.readCount + 'r');
+            if (f.editCount > 0) countsParts.push(f.editCount + 'w');
+            filesRows +=
+              '<div class="ctx-row" title="' + escapeHtml(f.path) + '">' +
+                '<div class="ctx-row-left">' +
+                  '<span class="ctx-row-label mono" style="font-size:11.5px;">' + escapeHtml(f.label) + '</span>' +
+                  '<span class="ctx-row-sub">(' + escapeHtml(countsParts.join(' · ')) + ')</span>' +
+                '</div>' +
+                '<span class="ctx-row-val">' + escapeHtml(formatBytes(f.bytes)) + '</span>' +
+              '</div>';
+          }
+          topFilesSectionHtml =
+            '<div class="ctx-section">' +
+              '<div class="ctx-section-title">Most Touched Files (Active Window)</div>' +
+              filesRows +
+            '</div>';
+        }
+
+        return (
+          '<div class="modal-card ctx-modal-card" role="dialog" aria-modal="true">' +
+            '<div class="ctx-modal-head">' +
+              '<div class="ctx-modal-title-wrap">' +
+                '<div class="modal-title">Context Window Breakdown</div>' +
+                '<div class="ctx-modal-sub">' + escapeHtml(subText) + '</div>' +
+              '</div>' +
+              '<span class="ctx-modal-pill">' + escapeHtml(pillText) + '</span>' +
+            '</div>' +
+            '<div class="ctx-modal-scroll" data-scroll-key="ctx-modal-scroll">' +
+              '<div class="ctx-section">' +
+                '<div class="ctx-section-title">1. Base vs Active Turn Growth</div>' +
+                '<div class="ctx-split-bar">' +
+                  '<div class="ctx-split-seg" style="width:' + basePct + '%;background:#3b82f6;"></div>' +
+                  '<div class="ctx-split-seg" style="width:' + growthPct + '%;background:#10b981;"></div>' +
+                '</div>' +
+                '<div class="ctx-row">' +
+                  '<div class="ctx-row-left">' +
+                    '<span class="ctx-dot" style="background:#3b82f6;"></span>' +
+                    '<span class="ctx-row-label">' + escapeHtml(baseLabel) + '</span>' +
+                  '</div>' +
+                  '<span class="ctx-row-val">' + escapeHtml(formatTokens(baseTok) + ' tok') + '</span>' +
+                '</div>' +
+                (baseSubNote ? '<div class="ctx-row-sub">' + escapeHtml(baseSubNote) + '</div>' : '') +
+                '<div class="ctx-row">' +
+                  '<div class="ctx-row-left">' +
+                    '<span class="ctx-dot" style="background:#10b981;"></span>' +
+                    '<span class="ctx-row-label">Active Conversation Growth</span>' +
+                  '</div>' +
+                  '<span class="ctx-row-val">+' + escapeHtml(formatTokens(growthTok) + ' tok') + '</span>' +
+                '</div>' +
+                '<div class="ctx-row-sub">' + escapeHtml(growthSubNote) + '</div>' +
+              '</div>' +
+
+              '<div class="ctx-section">' +
+                '<div class="ctx-section-title">2. Loaded Skills</div>' +
+                skillsHtml +
+              '</div>' +
+
+              '<div class="ctx-section">' +
+                '<div class="ctx-section-title">3. Tool Activity (Active Window)</div>' +
+                categoriesHtml +
+              '</div>' +
+
+              '<div class="ctx-section">' +
+                '<div class="ctx-section-title">4. Top 5 Heaviest Steps</div>' +
+                heaviestHtml +
+              '</div>' +
+
+              topFilesSectionHtml +
+            '</div>' +
+            '<div class="modal-actions">' +
+              '<button class="btn-secondary" data-action="close-modal">Close</button>' +
+            '</div>' +
+          '</div>'
+        );
+      }
+
+      function refreshContextBreakdownModal() {
+        if (!isContextBreakdownModalOpen()) return;
+        const convId = state.activeContextModalConvId;
+        const scrollEl = modalBackdropEl.querySelector('.ctx-modal-scroll');
+        const scrollTop = scrollEl ? scrollEl.scrollTop : 0;
+        const html = renderContextBreakdownModalHtml(convId);
+        if (modalBackdropEl.innerHTML !== html) {
+          modalBackdropEl.innerHTML = html;
+          const nextScrollEl = modalBackdropEl.querySelector('.ctx-modal-scroll');
+          if (nextScrollEl) nextScrollEl.scrollTop = scrollTop;
+        }
+      }
+
+      async function fetchContextBreakdownForModal(convId) {
+        if (!convId) return;
+        state.contextModalReqSeq += 1;
+        const reqSeq = state.contextModalReqSeq;
+        try {
+          const res = await apiFetch('/api/context-breakdown?id=' + encodeURIComponent(convId));
+          if (
+            reqSeq !== state.contextModalReqSeq ||
+            state.activeContextModalConvId !== convId ||
+            !modalBackdropEl ||
+            !modalBackdropEl.classList.contains('open')
+          ) {
+            return;
+          }
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) {
+            throw new Error(data.error || 'Failed to load context breakdown');
+          }
+          state.contextModalData = data;
+          state.contextModalLoading = false;
+          state.contextModalError = '';
+          const card = state.conversations.find((c) => c.id === convId);
+          state.contextModalLastSig = card
+            ? [card.id, card.currentTokens, card.compactCount, card.promptCount, card.totalTokens].join(':')
+            : '';
+          refreshContextBreakdownModal();
+        } catch (err) {
+          if (
+            reqSeq !== state.contextModalReqSeq ||
+            state.activeContextModalConvId !== convId ||
+            !modalBackdropEl ||
+            !modalBackdropEl.classList.contains('open')
+          ) {
+            return;
+          }
+          state.contextModalLoading = false;
+          state.contextModalError = err && err.message ? err.message : 'Failed to load context breakdown';
+          refreshContextBreakdownModal();
+        }
+      }
+
+      function openContextBreakdownModal(convId) {
+        if (!modalBackdropEl || !convId) return;
+        stopQuotaModalTimer();
+        state.openMenuConvId = null;
+        state.activeContextModalConvId = convId;
+        state.contextModalError = '';
+        if (!state.contextModalData || state.contextModalData.id !== convId) {
+          state.contextModalData = null;
+          state.contextModalLoading = true;
+        }
+        modalBackdropEl.innerHTML = renderContextBreakdownModalHtml(convId);
+        modalBackdropEl.classList.add('open');
+        void fetchContextBreakdownForModal(convId);
+      }
+
+      function refreshContextBreakdownModalOnPoll() {
+        if (!isContextBreakdownModalOpen()) return;
+        const convId = state.activeContextModalConvId;
+        const card = state.conversations.find((c) => c.id === convId);
+        if (!card) return;
+        const nextSig = [card.id, card.currentTokens, card.compactCount, card.promptCount, card.totalTokens].join(':');
+        if (nextSig !== state.contextModalLastSig) {
+          state.contextModalLastSig = nextSig;
+          void fetchContextBreakdownForModal(convId);
+        } else {
+          refreshContextBreakdownModal();
+        }
       }
 
       document.addEventListener('scroll', (e) => {
@@ -2434,10 +2999,10 @@
             gitStatusHtml +
           '</div>' +
 
-          '<div class="meter-group">' +
+          '<div class="meter-group" data-action="open-context-modal" data-id="' + escapeHtml(card.id) + '" title="Click to inspect context window breakdown">' +
             '<div class="meter-head">' +
               '<span class="muted">Context window</span>' +
-              '<span class="mono">' + escapeHtml(rightLabel) + '</span>' +
+              '<span class="mono context-meter-val">' + escapeHtml(rightLabel) + '</span>' +
             '</div>' +
             '<div class="meter-track">' +
               '<div class="meter-fill" style="width:' + fillPct + '%;background:' + barColor + ';"></div>' +
@@ -2494,6 +3059,7 @@
                     (isPinned ? 'Unpin from top' : 'Pin to top') +
                   '</button>' +
                   '<button class="card-menu-item" data-action="prompt-rename-conv" data-id="' + idEsc + '" data-title="' + titleEsc + '" data-default-title="' + defaultTitleEsc + '">Rename...</button>' +
+                  '<button class="card-menu-item" data-action="copy-conv-id" data-id="' + idEsc + '">Copy ID</button>' +
                   '<div class="ctx-menu-sep"></div>' +
                   '<button class="card-menu-item" data-action="archive-conv" data-id="' + idEsc + '">Archive</button>' +
                   '<button class="card-menu-item danger" data-action="prompt-delete-conv" data-id="' + idEsc + '" data-title="' + titleEsc + '">Delete</button>' +
@@ -2776,7 +3342,7 @@
                 '</select>' +
               '</div>' +
             '</div>' +
-            '<textarea class="new-chat-textarea" id="new-chat-textarea" placeholder="Write a prompt to start a new conversation... (Ctrl+Enter to send)"' + (state.newChatSending ? ' readonly' : '') + '>' +
+            '<textarea class="new-chat-textarea" id="new-chat-textarea" rows="5" placeholder="Write a prompt to start a new conversation... (Ctrl+Enter to send)"' + (state.newChatSending ? ' readonly' : '') + '>' +
               escapeHtml(state.newChatText) +
             '</textarea>' +
             '<div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;">' +
@@ -2990,6 +3556,7 @@
         renderDiagnosticsSticky();
         renderQuotaPill(pinnedCard);
         refreshQuotaModal();
+        refreshContextBreakdownModalOnPoll();
 
         const q = state.searchQuery.trim().toLowerCase();
         const filtered = state.conversations.filter((c) => {
@@ -3227,7 +3794,7 @@
           if (item.fixHint) lines.push(`  Fix Hint: ${item.fixHint}`);
         }
         lines.push('');
-        lines.push('Run `node setup.cjs --doctor` (and `/agy-api-audit` if needed) and fix the affected contracts in d:\\dev\\tools\\antigravity.');
+        lines.push('Run `node setup.cjs --doctor` (and `/agy-api-audit` if needed) and fix the affected contracts in the agy-cockpit repository (sidecars/agy-cockpit/server.cjs, sidecars/agy-cockpit/ui.html, setup.cjs).');
         await copyTextToClipboard(lines.join('\n'));
         showToast('Copied AGY contract fix prompt');
       }
@@ -3702,6 +4269,8 @@
 
       function openRenameConvModal(convId, fallbackTitle, fallbackDefault) {
         if (!modalBackdropEl || !convId) return;
+        state.activeContextModalConvId = null;
+        state.contextModalReqSeq += 1;
         state.openMenuConvId = null;
         renderAll();
         const card = state.conversations.find((c) => c.id === convId);
@@ -3858,6 +4427,8 @@
 
       function openDeleteConvConfirmModal(convId, convTitle) {
         if (!modalBackdropEl || !convId) return;
+        state.activeContextModalConvId = null;
+        state.contextModalReqSeq += 1;
         state.openMenuConvId = null;
         renderAll();
         const safeTitle = escapeHtml(convTitle || ('Conversation ' + convId.slice(0, 8)));
@@ -3928,12 +4499,16 @@
       function closeModal() {
         if (!modalBackdropEl) return;
         stopQuotaModalTimer();
+        state.activeContextModalConvId = null;
+        state.contextModalReqSeq += 1;
         modalBackdropEl.classList.remove('open');
         modalBackdropEl.innerHTML = '';
       }
 
       function openArchiveConfirmModal(projectId, projectName, wsKey) {
         if (!modalBackdropEl || !projectId) return;
+        state.activeContextModalConvId = null;
+        state.contextModalReqSeq += 1;
         const safeName = escapeHtml(projectName || 'this project');
         modalBackdropEl.innerHTML =
           '<div class="modal-card" role="dialog" aria-modal="true">' +
@@ -3951,6 +4526,8 @@
 
       function openArchivedModal() {
         if (!modalBackdropEl) return;
+        state.activeContextModalConvId = null;
+        state.contextModalReqSeq += 1;
         const projList = Array.isArray(state.archivedProjects) ? state.archivedProjects : [];
         const convList = Array.isArray(state.archivedConversations) ? state.archivedConversations : [];
         if (projList.length === 0 && convList.length === 0) {
@@ -4134,6 +4711,10 @@
           openQuotaModal();
           return;
         }
+        if (action === 'open-context-modal' && convId) {
+          openContextBreakdownModal(convId);
+          return;
+        }
         if (action === 'confirm-archive-project') {
           const projId = actionBtn.getAttribute('data-project-id');
           const projName = actionBtn.getAttribute('data-project-name') || '';
@@ -4162,6 +4743,13 @@
           const cTitle = actionBtn.getAttribute('data-title') || '';
           const dTitle = actionBtn.getAttribute('data-default-title') || '';
           openRenameConvModal(convId, cTitle, dTitle);
+          return;
+        }
+        if (action === 'copy-conv-id' && convId) {
+          state.openMenuConvId = null;
+          renderAll();
+          await copyTextToClipboard(convId);
+          showToast('Copied conversation ID');
           return;
         }
         if (action === 'reset-rename-conv' && convId) {
@@ -4285,7 +4873,7 @@
             renderAll();
             ensureModelsLoaded(targetConvId, false);
           }
-        } else if (action === 'cancel-pending-handoff' || action === 'cancel-handoff') {
+        } else if (action === 'cancel-pending-handoff') {
           cancelPendingSmartHandoff(true);
         } else if (action === 'handoff-smart-run' && convId) {
           handleSmartHandoffRun(convId);

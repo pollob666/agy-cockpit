@@ -8,7 +8,7 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 1. **Context Compaction (`CHECKPOINT` events)**: Each time a conversation hits the model's context window ceiling, Antigravity compacts older turns into a summary and retains only the last 10 user prompts verbatim. Repeated compactions gradually dilute earlier architectural constraints and debugging details.
 2. **Git Repository Drift (`commits behind HEAD`)**: When commits are created in another terminal, branch, or conversation, an older chat's mental model of the repository falls out of sync with `HEAD`.
 
-**AGY Cockpit** runs as a lightweight sidecar panel inside Antigravity (`Auxiliary Pane` and `Sidebar`). It monitors live context window usage, compaction tiers, cumulative token consumption (including spawned subagents), and Git drift across all your projects, and provides a **Two-Step Smart Handoff** to seamlessly continue work in a fresh conversation.
+**AGY Cockpit** runs as a lightweight sidecar panel inside Antigravity (`Auxiliary Pane` and `Sidebar`). It monitors live context window usage, compaction tiers, cumulative token consumption (including spawned subagents), 5-hour and weekly model quota limits, and Git drift across all your projects, and provides a **Two-Step Smart Handoff** to seamlessly continue work in a fresh conversation.
 
 <p align="center">
   <img src="screenshots/hero.png" alt="AGY Cockpit Sidecar Panel" width="620" />
@@ -34,6 +34,16 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
   - Reads `currentTokens = input_tokens + cache_read_tokens` from the latest `PLANNER_RESPONSE`.
   - Records `compactTriggerTokens` immediately preceding each `CHECKPOINT` and computes `observedCompactCeiling` as their rolling median.
   - Adapts automatically if Antigravity changes the context window size in future updates. If `currentTokens` exceeds a previously observed ceiling before a new compact triggers, the stale percentage is hidden (`observing new ceiling`) until the next compaction is observed.
+- **Interactive Context Window Breakdown Modal**:
+  - Clicking the **Context window** meter (`n / ~m (x%)`) on the active card opens an on-demand breakdown of the active context window (since the latest `CHECKPOINT` compaction, or from conversation start if uncompacted) with zero overhead on background polling:
+    1. **Base vs Active Turn Growth**: Separates initial base context (`System & Rules / Initial Base` or `Base + Compaction Summary`, including cached system prefix tokens) from active turn token growth (`+X.Xk tok` across prompts and tool calls).
+    2. **Loaded Skills**: Lists `SKILL.md` and skill files read in the active window (plus any skills read prior to the last compaction) with exact byte and token footprints.
+    3. **Tool Activity by Category**: Groups active-window tool calls and outputs into `File Reads & Search`, `Terminal & Tasks`, `Code Edits & Writes`, and `Subagents & MCP` with call counts and byte/token volume bars.
+    4. **Top 5 Heaviest Steps & Most Touched Files**: Ranks the 5 largest individual tool steps (`argBytes + outputBytes`, accounting for `<truncated N bytes>` markers in `O(1)`) and the most read/edited project files in the active window.
+
+<p align="center">
+  <img src="screenshots/context-breakdown.png" alt="AGY Cockpit Context Window Breakdown Modal" width="420" />
+</p>
 
 ### 2. Total Token Usage & Subagent Breakdown
 - Tracks cumulative token usage across every turn of a conversation:
@@ -43,6 +53,7 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 - Automatically links spawned subagent conversations (`invoke_subagent` / `sender=<uuid>`) to their parent chat, hiding subagents from the main conversation list while aggregating their token consumption on the parent conversation card.
 - **Interactive Subagent Pill & Inline Breakdown (`+X.Xk · N sub ▾`)**: Clicking the subagent pill expands an inline list showing each spawned subagent's `↳` role/title, token consumption, and live status (`Done`, thinking dots `•••`, or amber `! Waiting permission` / `? Waiting answer`). Clicking any subagent row opens that subagent's conversation directly in Antigravity.
 - **Live Subagent Status Propagation**: If a background subagent is actively thinking (`•••`) or waiting on tool permission (`!`) or a user answer (`?`), its status automatically propagates to the parent conversation card and project filter tab.
+- **5-Hour & Weekly Model Usage Quota Ring**: Displays a live progress ring in the top bar matched to the active conversation's model family (`Anthropic Claude`, `Google Gemini`, `OpenAI`) or the highest usage bottleneck across families. Clicking the quota pill opens the **Model usage limits** modal with per-window usage bars (`5-hour`, `Daily`, `Weekly`, `Monthly`), remaining percentages, and live reset countdowns.
 
 ### 3. Git / Repository Drift Detection
 - Detects the Git repository root associated with each conversation and compares the conversation's last activity timestamp against `HEAD` (excluding commits created inside that conversation).
@@ -53,11 +64,11 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 - **Project-Scoped Filter Tabs & Live Thinking / Waiting / Unread Indicators**: Syncs with `~/.gemini/config/projects/` and `window.sidecar.getWorkspaceUris()` (`onWorkspaceChange`) to scope the conversation list to the active project, with tabs to switch across projects or browse `All`. Project tabs and conversation cards display animated thinking dots (`•••`) while an agent is streaming or executing tools, amber `!` (waiting for permission approval) or `?` (waiting for your answer to a question) badges when stalled on user input, and an unread blue dot (`●`) once a background reply completes.
 - **Quick New Conversation (`+ New`)**: Spawn a new conversation directly from the filter bar inside the current/selected project workspace or as a general (`No Project`) chat without leaving the panel.
 - **Turn Previews (`You:` / `AI:`)**: Compact cards in `Other conversations` preview both your latest prompt (`You:`) and the model's latest response (`AI:`) on separate lines.
-- **Conversation Pinning, Custom Renaming, Archiving & Deletion**: Right-click any project tab to **Archive Project**, or use the bottom-right gear menu (`⚙`) on any conversation card to **Pin to top** / **Unpin from top**, **Rename...** (with **Reset Default**), **Archive** (restorable from `Archived (N)`), or permanently **Delete** (`DeleteCascadeTrajectory` with confirmation).
+- **Conversation Pinning, Custom Renaming, Archiving & Deletion**: Right-click any project tab to start a **`+ New chat in "<Project>"`** or **Archive** the project, or use the bottom-right gear menu (`⚙`) on any conversation card to **Pin to top** / **Unpin from top**, **Rename...** (with **Reset Default**), **Copy ID**, **Archive** (restorable from `Archived (N)`), or permanently **Delete** (`DeleteCascadeTrajectory` with confirmation).
 - **Instant Full-Text Search & Prompt History**: Filters conversations in real time across titles, `USER_INPUT` prompts, and `Task Overview` checkpoint summaries. Expanding `History & Commits` shows missed Git commits, the latest compact overview, and user prompts clamped to 3 lines (`Show more` / `Show less`).
 
 ### 5. Two-Step Smart Handoff & Dynamic Model Selector
-- **Step 1 (Optional Focus & AI Generation)**: Click **Smart Handoff** to open an editable focus box where you can optionally specify instructions for the next chat (such as focusing on a specific subtask or writing the handoff in another language), then click **Generate Handoff Prompt**. AGY Cockpit sends an `[AGY Cockpit Smart Handoff]` request to the conversation's agent instructing it to produce a self-contained `<HANDOFF_PROMPT>` without calling any tools.
+- **Step 1 (Optional Focus, AI Generation & Cancellation)**: Click **Smart Handoff** to open an editable focus box where you can optionally specify instructions for the next chat (such as focusing on a specific subtask or writing the handoff in another language), then click **Generate Handoff Prompt**. AGY Cockpit sends an `[AGY Cockpit Smart Handoff]` request to the conversation's agent instructing it to produce a self-contained `<HANDOFF_PROMPT>` without calling any tools. While generating, you can click **Cancel** at any time to abort the in-flight agent invocation (`CancelCascadeInvocation`).
 - **Step 2 (Review, Edit, Select Model & Launch)**: As soon as the agent replies, the extracted `<HANDOFF_PROMPT>` is loaded directly into the plugin's editor so you can review or edit it before clicking **Start New Chat** or **Copy**. Clearing the text box (for example with `Ctrl+A` and `Backspace`) automatically switches the drawer back to Step 1 (**Generate Handoff Prompt**) so you can enter new instructions and regenerate.
 - **Dynamic Model & Thinking Tier Selector**: Discovers all models and thinking tiers available to your account from the local Antigravity Language Server, pre-selects the active conversation's current model and thinking tier by default, and launches the new conversation directly with the chosen model and thinking tier from Step 0 inside the same project and workspace.
 
@@ -66,7 +77,7 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 </p>
 
 ### 6. Antigravity Contract Verifier & Self-Diagnostics (`--doctor`)
-- **Automated AGY Update Protection**: Verifies all 9 internal Antigravity contracts (`plugin_installation_sync`, `app_data_dirs`, `transcript_schema`, `annotations_pbtxt`, `projects_registry`, `language_server_binary`, `language_server_live_rpc`, `agentapi_cli`, and `sidecar_bridge_and_perf`) whenever the sidecar boots or when the `language_server` binary changes on disk after an Antigravity update.
+- **Automated AGY Update Protection**: `node setup.cjs --doctor` verifies all 9 internal Antigravity contracts (`plugin_installation_sync`, `app_data_dirs`, `transcript_schema`, `annotations_pbtxt`, `projects_registry`, `language_server_binary`, `language_server_live_rpc`, `agentapi_cli`, and `sidecar_bridge_and_perf`), and the running sidecar automatically checks the 8 runtime contracts whenever it boots or when the `language_server` binary changes on disk after an Antigravity update.
 - **Sticky Bottom Warning Drawer**: Stays completely invisible when all contracts pass (`ok`). If an Antigravity update renames or changes an RPC, CLI flag, or transcript schema field, a sticky floating bar appears at the bottom of the panel with a collapsible contract list, **Re-run Doctor**, and **Copy Fix Prompt** (ready to paste into any coding agent with exact failed contract IDs and `server.cjs` symbols).
 
 ---
@@ -163,6 +174,7 @@ Once installed, **AGY Cockpit** is automatically enabled and available in:
 ├── screenshots/
 │   ├── hero.png                      # Full AGY Cockpit panel preview
 │   ├── compaction-tiers.gif          # Animated progression across compaction tiers
+│   ├── context-breakdown.png         # On-demand Context Window Breakdown modal
 │   └── smart-handoff.png             # Smart Handoff editor with Model & Thinking Tier selector
 ├── setup.cjs                         # Cross-platform installer & updater (Windows & Linux)
 ├── AGENTS.md                         # Instructions & installation runbook for AI coding agents

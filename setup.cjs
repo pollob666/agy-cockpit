@@ -216,7 +216,7 @@ function checkStatus() {
     sidecarInstalled: sidecarOk
   }, null, 2));
 
-  if (!pluginOk || !sidecarOk) {
+  if (!pluginOk || !readmeOk || !sidecarOk) {
     process.exitCode = 1;
   }
 }
@@ -234,12 +234,14 @@ function filesMatchByteForByte(fileA, fileB) {
 
 function checkPluginSyncContract() {
   const destPluginJson = path.join(PLUGIN_DEST_DIR, 'plugin.json');
+  const destReadmeMd = path.join(PLUGIN_DEST_DIR, 'README.md');
   const destSidecarJson = path.join(SIDECAR_DEST_DIR, 'sidecar.json');
   const destServerCjs = path.join(SIDECAR_DEST_DIR, 'server.cjs');
   const destUiHtml = path.join(SIDECAR_DEST_DIR, 'ui.html');
 
   const installed =
     fs.existsSync(destPluginJson) &&
+    (!fs.existsSync(README_SRC_FILE) || fs.existsSync(destReadmeMd)) &&
     fs.existsSync(destSidecarJson) &&
     fs.existsSync(destServerCjs) &&
     fs.existsSync(destUiHtml);
@@ -287,6 +289,7 @@ function checkPluginSyncContract() {
 
   const diffs = [];
   if (!filesMatchByteForByte(PLUGIN_SRC_FILE, destPluginJson)) diffs.push('plugin.json');
+  if (fs.existsSync(README_SRC_FILE) && !filesMatchByteForByte(README_SRC_FILE, destReadmeMd)) diffs.push('README.md');
   if (!sidecarJsonSyncOk) diffs.push('sidecar.json');
   if (!filesMatchByteForByte(path.join(SIDECAR_SRC_DIR, 'server.cjs'), destServerCjs)) diffs.push('server.cjs');
   if (!filesMatchByteForByte(path.join(SIDECAR_SRC_DIR, 'ui.html'), destUiHtml)) diffs.push('ui.html');

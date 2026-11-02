@@ -384,6 +384,534 @@ function extractCheckpointOverview(content) {
     .slice(0, 4000);
 }
 
+const TRUNCATED_BYTES_RE = /<truncated\s+(\d+)\s+bytes>/gi;
+const SKILL_PATH_RE = /\/skills\/([^/]+)\/(.+)$/i;
+
+function estimateRawUtf8Bytes(str) {
+  if (!str || typeof str !== 'string') return 0;
+  let total = Buffer.byteLength(str, 'utf-8');
+  if (str.includes('<truncated ')) {
+    TRUNCATED_BYTES_RE.lastIndex = 0;
+    let m;
+    while ((m = TRUNCATED_BYTES_RE.exec(str)) !== null) {
+      const extra = parseInt(m[1], 10);
+      if (Number.isFinite(extra) && extra > 0) {
+        total += extra;
+      }
+    }
+  }
+  return total;
+}
+
+function cleanTranscriptArgString(val) {
+  if (val === null || val === undefined) return '';
+  if (typeof val !== 'string') return String(val);
+  let s = val.trim();
+  if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) {
+    try {
+      const parsed = JSON.parse(s);
+      if (typeof parsed === 'string') return parsed;
+    } catch {}
+  }
+  if (s.startsWith('"')) {
+    s = s.slice(1);
+  }
+  if (s.endsWith('"')) {
+    s = s.slice(0, -1);
+  }
+  return s
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t');
+}
+
+function estimateToolArgsBytes(args) {
+  if (!args || typeof args !== 'object') return 0;
+  let total = 0;
+  for (const [k, v] of Object.entries(args)) {
+    total += Buffer.byteLength(k, 'utf-8');
+    if (typeof v === 'string') {
+      total += estimateRawUtf8Bytes(cleanTranscriptArgString(v));
+    } else if (v !== null && v !== undefined) {
+      total += estimateRawUtf8Bytes(JSON.stringify(v));
+    }
+  }
+  return total;
+}
+
+function extractToolFilePath(args) {
+  if (!args || typeof args !== 'object') return '';
+  const raw =
+    args.Path ??
+    args.AbsolutePath ??
+    args.TargetFile ??
+    args.DirectoryPath ??
+    args.SearchPath ??
+    args.SearchDirectory ??
+    args.path ??
+    '';
+  const cleaned = cleanTranscriptArgString(raw).trim();
+  if (!cleaned) return '';
+  return cleaned.replace(/\\\\/g, '/').replace(/\\/g, '/');
+}
+
+function extractSkillFromPath(normPath) {
+  if (!normPath) return null;
+  const m = SKILL_PATH_RE.exec(normPath);
+  if (!m) return null;
+  return {
+    skillName: m[1],
+    relFile: m[2]
+  };
+}
+
+function formatToolStepTarget(toolName, args) {
+  const safeArgs = args && typeof args === 'object' ? args : {};
+  const normPath = extractToolFilePath(safeArgs);
+
+  if (toolName === 'read_file' || toolName === 'view_file') {
+    const skillInfo = extractSkillFromPath(normPath);
+    let label = skillInfo
+      ? `${skillInfo.skillName}/${skillInfo.relFile}`
+      : (normPath.split('/').filter(Boolean).pop() || normPath || toolName);
+    const startLine = cleanTranscriptArgString(safeArgs.StartLine ?? safeArgs.start_line ?? '').trim();
+    const endLine = cleanTranscriptArgString(safeArgs.EndLine ?? safeArgs.end_line ?? '').trim();
+    if (startLine && endLine) {
+      label += ` (L${startLine}-${endLine})`;
+    } else if (startLine) {
+      label += ` (L${startLine}+)`;
+    } else if (endLine) {
+      label += ` (L1-${endLine})`;
+    }
+    return label;
+  }
+
+  if (
+    toolName === 'edit_file' ||
+    toolName === 'write_file' ||
+    toolName === 'replace_file_content' ||
+    toolName === 'multi_replace_file_content' ||
+    toolName === 'delete_file'
+  ) {
+    return normPath.split('/').filter(Boolean).pop() || normPath || toolName;
+  }
+
+  if (toolName === 'run_command') {
+    const cmd = cleanTranscriptArgString(safeArgs.CommandLine ?? safeArgs.command ?? safeArgs.toolSummary ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cmd) return 'run_command';
+    return cmd.length > 64 ? cmd.slice(0, 61) + '...' : cmd;
+  }
+
+  if (toolName === 'manage_task') {
+    const act = cleanTranscriptArgString(safeArgs.Action ?? '').trim();
+    const tid = cleanTranscriptArgString(safeArgs.TaskId ?? '').trim();
+    return [act, tid].filter(Boolean).join(' ') || 'manage_task';
+  }
+
+  if (toolName === 'grep_search') {
+    const q = cleanTranscriptArgString(safeArgs.Query ?? safeArgs.query ?? '').replace(/\s+/g, ' ').trim();
+    const base = normPath ? normPath.split('/').filter(Boolean).pop() : '';
+    const qPart = q ? `"${q.length > 36 ? q.slice(0, 33) + '...' : q}"` : 'grep';
+    return base ? `${qPart} in ${base}` : qPart;
+  }
+
+  if (toolName === 'find_by_name' || toolName === 'list_dir') {
+    const pat = cleanTranscriptArgString(safeArgs.Pattern ?? '').trim();
+    const base = normPath ? normPath.split('/').filter(Boolean).pop() : '';
+    return [pat, base].filter(Boolean).join(' in ') || normPath || toolName;
+  }
+
+  if (toolName === 'call_mcp_tool') {
+    const srv = cleanTranscriptArgString(safeArgs.ServerName ?? '').trim();
+    const tl = cleanTranscriptArgString(safeArgs.ToolName ?? '').trim();
+    return [srv, tl].filter(Boolean).join(' / ') || 'call_mcp_tool';
+  }
+
+  if (toolName === 'invoke_subagent') {
+    const role = cleanTranscriptArgString(safeArgs.Role ?? safeArgs.role ?? safeArgs.TypeName ?? safeArgs.type_name ?? '').trim();
+    return role || 'subagent';
+  }
+
+  if (toolName === 'send_message') {
+    const rec = cleanTranscriptArgString(safeArgs.Recipient ?? '').trim();
+    return rec ? `to ${rec.slice(0, 8)}` : 'send_message';
+  }
+
+  if (toolName === 'search_web' || toolName === 'search_marketplace') {
+    const q = cleanTranscriptArgString(safeArgs.query ?? safeArgs.queries ?? '').replace(/\s+/g, ' ').trim();
+    return q ? (q.length > 50 ? q.slice(0, 47) + '...' : q) : toolName;
+  }
+
+  for (const val of Object.values(safeArgs)) {
+    const cleaned = cleanTranscriptArgString(val).replace(/\s+/g, ' ').trim();
+    if (cleaned) {
+      return cleaned.length > 50 ? cleaned.slice(0, 47) + '...' : cleaned;
+    }
+  }
+  return toolName;
+}
+
+function classifyToolCategory(toolName) {
+  if (
+    toolName === 'read_file' ||
+    toolName === 'view_file' ||
+    toolName === 'view_file_outline' ||
+    toolName === 'view_code_item' ||
+    toolName === 'grep_search' ||
+    toolName === 'find_by_name' ||
+    toolName === 'list_dir'
+  ) {
+    return 'file_reads_search';
+  }
+  if (
+    toolName === 'run_command' ||
+    toolName === 'manage_task' ||
+    toolName === 'command_status' ||
+    toolName === 'send_command_input' ||
+    toolName === 'read_terminal' ||
+    toolName === 'schedule'
+  ) {
+    return 'terminal_tasks';
+  }
+  if (
+    toolName === 'edit_file' ||
+    toolName === 'write_file' ||
+    toolName === 'replace_file_content' ||
+    toolName === 'multi_replace_file_content' ||
+    toolName === 'delete_file'
+  ) {
+    return 'code_edits_writes';
+  }
+  return 'subagents_mcp';
+}
+
+function buildContextBreakdownForTranscript(convId, transcriptPath, entry, observedCeiling) {
+  const categoriesMap = {
+    file_reads_search: { id: 'file_reads_search', label: 'File Reads & Search', count: 0, bytes: 0, estTokens: 0 },
+    terminal_tasks: { id: 'terminal_tasks', label: 'Terminal & Tasks', count: 0, bytes: 0, estTokens: 0 },
+    code_edits_writes: { id: 'code_edits_writes', label: 'Code Edits & Writes', count: 0, bytes: 0, estTokens: 0 },
+    subagents_mcp: { id: 'subagents_mcp', label: 'Subagents & MCP', count: 0, bytes: 0, estTokens: 0 }
+  };
+
+  const stepsByIdx = new Map();
+  const unindexedSteps = [];
+
+  if (transcriptPath && isFile(transcriptPath)) {
+    try {
+      const rawText = fs.readFileSync(transcriptPath, 'utf-8');
+      const lines = rawText.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line || line.length < 2) continue;
+        try {
+          const obj = JSON.parse(line);
+          if (!obj || typeof obj !== 'object') continue;
+          if (typeof obj.step_index === 'number') {
+            const prev = stepsByIdx.get(obj.step_index);
+            if (prev) {
+              stepsByIdx.set(obj.step_index, {
+                ...prev,
+                ...obj,
+                content: (typeof obj.content === 'string' && obj.content.length > 0)
+                  ? obj.content
+                  : (prev.content || ''),
+                tool_calls: (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0)
+                  ? obj.tool_calls
+                  : (prev.tool_calls || []),
+                input_tokens: (typeof obj.input_tokens === 'number' && obj.input_tokens > 0)
+                  ? obj.input_tokens
+                  : (prev.input_tokens || 0),
+                cache_read_tokens: (typeof obj.cache_read_tokens === 'number' && obj.cache_read_tokens > 0)
+                  ? obj.cache_read_tokens
+                  : (prev.cache_read_tokens || 0),
+                output_tokens: (typeof obj.output_tokens === 'number' && obj.output_tokens > 0)
+                  ? obj.output_tokens
+                  : (prev.output_tokens || 0)
+              });
+            } else {
+              stepsByIdx.set(obj.step_index, obj);
+            }
+          } else {
+            unindexedSteps.push(obj);
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  const steps = [
+    ...[...stepsByIdx.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]),
+    ...unindexedSteps
+  ];
+  let lastCheckpointIdx = -1;
+  let totalCheckpoints = 0;
+  for (let i = 0; i < steps.length; i++) {
+    if (steps[i].type === 'CHECKPOINT') {
+      lastCheckpointIdx = i;
+      totalCheckpoints += 1;
+    }
+  }
+
+  const activeSkillsMap = new Map();
+  const compactedSkillsMap = new Map();
+  const activeToolSteps = [];
+  const activeFilesMap = new Map();
+
+  let firstPlannerTotal = 0;
+  let firstPlannerCacheRead = 0;
+  let lastPlannerTotal = 0;
+  let activePromptsCount = 0;
+  let activePlannerStepsCount = 0;
+  let activeToolCallsCount = 0;
+  let userMessagesBytes = 0;
+  let assistantTextBytes = 0;
+  let checkpointSummaryBytes = 0;
+
+  if (lastCheckpointIdx >= 0 && steps[lastCheckpointIdx]) {
+    checkpointSummaryBytes = estimateRawUtf8Bytes(steps[lastCheckpointIdx].content || '');
+  }
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const type = step.type || '';
+    const isActive = i > lastCheckpointIdx;
+    const content = typeof step.content === 'string' ? step.content : '';
+
+    if (isActive && type === 'USER_INPUT') {
+      const cleaned = cleanUserPrompt(content);
+      if (
+        cleaned &&
+        !cleaned.startsWith('[AGY Cockpit Smart Handoff]') &&
+        !cleaned.startsWith('[Context Health Smart Handoff]')
+      ) {
+        activePromptsCount += 1;
+        userMessagesBytes += estimateRawUtf8Bytes(cleaned);
+      }
+      continue;
+    }
+
+    if (isActive && type === 'SYSTEM_MESSAGE' && i > 0) {
+      const sysBytes = estimateRawUtf8Bytes(content);
+      if (sysBytes > 0) {
+        const isSubagentMsg = SENDER_UUID_RE.test(content);
+        const catKey = isSubagentMsg ? 'subagents_mcp' : 'terminal_tasks';
+        categoriesMap[catKey].count += 1;
+        categoriesMap[catKey].bytes += sysBytes;
+      }
+      continue;
+    }
+
+    if (type === 'PLANNER_RESPONSE') {
+      const toolCalls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
+
+      if (isActive) {
+        activePlannerStepsCount += 1;
+        if (content) {
+          assistantTextBytes += estimateRawUtf8Bytes(content);
+        }
+        const inTok = typeof step.input_tokens === 'number' && step.input_tokens > 0 ? step.input_tokens : 0;
+        const cacheTok = typeof step.cache_read_tokens === 'number' && step.cache_read_tokens > 0 ? step.cache_read_tokens : 0;
+        const stepTotalTok = inTok + cacheTok;
+        if (stepTotalTok > 0) {
+          if (firstPlannerTotal === 0) {
+            firstPlannerTotal = stepTotalTok;
+            firstPlannerCacheRead = cacheTok;
+          }
+          lastPlannerTotal = stepTotalTok;
+        }
+      }
+
+      if (toolCalls.length === 0) continue;
+
+      const turnGenerics = [];
+      for (let j = i + 1; j < steps.length; j++) {
+        const nextType = steps[j].type || '';
+        if (nextType === 'PLANNER_RESPONSE' || nextType === 'CHECKPOINT' || nextType === 'USER_INPUT') {
+          break;
+        }
+        if (nextType === 'GENERIC') {
+          turnGenerics.push(steps[j]);
+        }
+      }
+
+      let filteredGenerics = turnGenerics;
+      let extraSubagentBytes = 0;
+      if (turnGenerics.length > toolCalls.length) {
+        filteredGenerics = [];
+        for (const g of turnGenerics) {
+          const gc = typeof g.content === 'string' ? g.content : '';
+          if (
+            gc.startsWith('Created the following subagent') &&
+            turnGenerics.length - filteredGenerics.length > toolCalls.length - filteredGenerics.length
+          ) {
+            extraSubagentBytes += estimateRawUtf8Bytes(gc);
+          } else {
+            filteredGenerics.push(g);
+          }
+        }
+      }
+
+      for (let k = 0; k < toolCalls.length; k++) {
+        const tc = toolCalls[k];
+        if (!tc || typeof tc !== 'object') continue;
+        const toolName = typeof tc.name === 'string' && tc.name.trim() ? tc.name.trim() : 'unknown';
+        const args = tc.args && typeof tc.args === 'object' ? tc.args : {};
+        const matchedGeneric = k < filteredGenerics.length ? filteredGenerics[k] : null;
+
+        const argBytes = estimateToolArgsBytes(args);
+        let outputBytes = matchedGeneric ? estimateRawUtf8Bytes(matchedGeneric.content || '') : 0;
+        if (toolName === 'invoke_subagent' && extraSubagentBytes > 0) {
+          outputBytes += extraSubagentBytes;
+          extraSubagentBytes = 0;
+        }
+        const totalBytes = argBytes + outputBytes;
+        const normPath = extractToolFilePath(args);
+        const skillInfo =
+          (toolName === 'read_file' || toolName === 'view_file')
+            ? extractSkillFromPath(normPath)
+            : null;
+
+        if (skillInfo) {
+          const targetMap = isActive ? activeSkillsMap : compactedSkillsMap;
+          const existingSkill = targetMap.get(skillInfo.skillName);
+          if (existingSkill) {
+            existingSkill.count += 1;
+            existingSkill.bytes += totalBytes;
+            if (!existingSkill.files.includes(skillInfo.relFile)) {
+              existingSkill.files.push(skillInfo.relFile);
+            }
+          } else {
+            targetMap.set(skillInfo.skillName, {
+              name: skillInfo.skillName,
+              files: [skillInfo.relFile],
+              count: 1,
+              bytes: totalBytes,
+              estTokens: 0
+            });
+          }
+        }
+
+        if (!isActive) continue;
+
+        activeToolCallsCount += 1;
+
+        if (!skillInfo) {
+          const catId = classifyToolCategory(toolName);
+          categoriesMap[catId].count += 1;
+          categoriesMap[catId].bytes += totalBytes;
+        }
+
+        const target = formatToolStepTarget(toolName, args);
+        activeToolSteps.push({
+          stepIndex: typeof step.step_index === 'number' ? step.step_index : i,
+          tool: toolName,
+          target,
+          bytes: totalBytes,
+          argBytes,
+          outputBytes,
+          estTokens: Math.round(totalBytes / 4)
+        });
+
+        const isReadTool = toolName === 'read_file' || toolName === 'view_file';
+        const isEditTool =
+          toolName === 'edit_file' ||
+          toolName === 'write_file' ||
+          toolName === 'replace_file_content' ||
+          toolName === 'multi_replace_file_content';
+
+        if (!skillInfo && normPath && (isReadTool || isEditTool)) {
+          const fileKey = workspaceComparisonKey(normPath);
+          const parts = normPath.split('/').filter(Boolean);
+          const label = parts.length >= 2
+            ? `${parts[parts.length - 2]}/${parts[parts.length - 1]}`
+            : (parts[parts.length - 1] || normPath);
+          const existingFile = activeFilesMap.get(fileKey);
+          if (existingFile) {
+            if (isReadTool) existingFile.readCount += 1;
+            if (isEditTool) existingFile.editCount += 1;
+            existingFile.totalCount += 1;
+            existingFile.bytes += totalBytes;
+          } else {
+            activeFilesMap.set(fileKey, {
+              path: normPath,
+              label,
+              readCount: isReadTool ? 1 : 0,
+              editCount: isEditTool ? 1 : 0,
+              totalCount: 1,
+              bytes: totalBytes,
+              estTokens: 0
+            });
+          }
+        }
+      }
+    }
+  }
+
+  const effectiveCompactCount = Math.max(totalCheckpoints, (entry && entry.compactCount) || 0);
+  const currentTokens = lastPlannerTotal > 0 ? lastPlannerTotal : ((entry && entry.currentTokens) || 0);
+  let baseTokens = firstPlannerTotal > 0
+    ? firstPlannerTotal
+    : (currentTokens > 0 ? currentTokens : ((entry && entry.baseContextTokens) || 0));
+  if (currentTokens > 0 && baseTokens > currentTokens) {
+    baseTokens = currentTokens;
+  }
+  const activeGrowthTokens = Math.max(0, currentTokens - baseTokens);
+  const ceiling = observedCeiling || 0;
+  const ceilingExceeded = ceiling > 0 && currentTokens > ceiling;
+  const contextRatio = ceiling > 0 && !ceilingExceeded ? Math.min(1, currentTokens / ceiling) : null;
+
+  const activeSkills = [...activeSkillsMap.values()]
+    .map((s) => ({ ...s, estTokens: Math.round(s.bytes / 4) }))
+    .sort((a, b) => b.bytes - a.bytes);
+
+  const compactedSkills = [...compactedSkillsMap.values()]
+    .map((s) => ({ ...s, estTokens: Math.round(s.bytes / 4) }))
+    .sort((a, b) => b.bytes - a.bytes);
+
+  const categories = Object.values(categoriesMap).map((c) => ({
+    ...c,
+    estTokens: Math.round(c.bytes / 4)
+  }));
+
+  const heaviestSteps = activeToolSteps
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, 5);
+
+  const topFiles = [...activeFilesMap.values()]
+    .map((f) => ({ ...f, estTokens: Math.round(f.bytes / 4) }))
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, 5);
+
+  return {
+    id: convId,
+    compactCount: effectiveCompactCount,
+    lastCompactMs: (entry && entry.lastCompactMs) || 0,
+    currentTokens,
+    observedCeiling: ceiling,
+    ceilingExceeded,
+    contextRatio,
+    baseTokens,
+    cachedSystemPrefixTokens: firstPlannerCacheRead,
+    activeGrowthTokens,
+    checkpointSummaryBytes,
+    checkpointSummaryEstTokens: Math.round(checkpointSummaryBytes / 4),
+    activePromptsCount,
+    activePlannerStepsCount,
+    activeToolCallsCount,
+    userMessagesBytes,
+    assistantTextBytes,
+    activeSkills,
+    compactedSkills,
+    categories,
+    heaviestSteps,
+    topFiles
+  };
+}
+
 function extractPathsFromToolCalls(toolCalls) {
   if (!Array.isArray(toolCalls)) return [];
   const results = [];
@@ -396,11 +924,12 @@ function extractPathsFromToolCalls(toolCalls) {
     if (!args) continue;
     for (const key of pathKeys) {
       if (typeof args[key] === 'string' && args[key].length > 2) {
-        results.push(args[key]);
+        results.push(cleanTranscriptArgString(args[key]));
       }
     }
     if (typeof args.CommandLine === 'string') {
-      const manifestMatch = /--manifest-path\s+["']?([^"'\s]+)["']?/i.exec(args.CommandLine);
+      const cleanedCmd = cleanTranscriptArgString(args.CommandLine);
+      const manifestMatch = /--manifest-path\s+["']?([^"'\s]+)["']?/i.exec(cleanedCmd);
       if (manifestMatch) results.push(manifestMatch[1]);
     }
   }
@@ -472,15 +1001,6 @@ function createEmptyEntry(convId) {
     configurable: true
   });
   return entry;
-}
-
-function isTruthyArg(val) {
-  if (val === true || val === 1) return true;
-  if (typeof val === 'string') {
-    const clean = val.replace(/^["'\s]+|["'\s]+$/g, '').toLowerCase();
-    return clean === 'true' || clean === '1';
-  }
-  return false;
 }
 
 function classifyToolCallsWait(toolCalls) {
@@ -807,7 +1327,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
       for (const tc of obj.tool_calls) {
         if (tc && tc.name === 'invoke_subagent' && tc.args && typeof tc.args === 'object') {
           const role = tc.args.Role || tc.args.role || tc.args.TypeName || tc.args.type_name || '';
-          entry.pendingSubagentRoles.push(typeof role === 'string' ? role.trim() : '');
+          entry.pendingSubagentRoles.push(typeof role === 'string' ? cleanTranscriptArgString(role).trim() : '');
         }
       }
       const rawPaths = extractPathsFromToolCalls(obj.tool_calls);
@@ -1516,8 +2036,8 @@ const LSRPC_CONTRACT_SPECS = [
   {
     method: 'SendUserCascadeMessage',
     critical: false,
-    caller: 'server.cjs:handleRequest (POST /_sidecar/new-conversation)',
-    purpose: 'Send initial user prompt to new cascade (falls back to agentapi CLI)'
+    caller: 'server.cjs:handleRequest (POST /_sidecar/send-message, POST /_sidecar/new-conversation)',
+    purpose: 'Send user or smart handoff prompt to an existing or newly created cascade (falls back to agentapi CLI)'
   },
   {
     method: 'UpdateConversationAnnotations',
@@ -3584,7 +4104,12 @@ class AgyCockpitServer {
       let plannerWithTokensCount = 0;
       let toolCallsCount = 0;
       let validToolCallsCount = 0;
+      let genericStepsCount = 0;
+      let truncatedStepsCount = 0;
+      let truncatedMarkerMatchedCount = 0;
       let truncatedWithoutFullCount = 0;
+      let breakdownProbeOk = true;
+      let breakdownProbeError = '';
 
       if (brainDirExists) {
         try {
@@ -3608,6 +4133,29 @@ class AgyCockpitServer {
             convDirsChecked += 1;
             if (!isFile(item.trPath)) continue;
             transcriptsFound += 1;
+            if (transcriptsFound === 1) {
+              try {
+                const bd = buildContextBreakdownForTranscript(
+                  item.id.toLowerCase(),
+                  item.trPath,
+                  this.convCache.get(item.id.toLowerCase()) || null,
+                  0
+                );
+                if (
+                  !bd ||
+                  !Array.isArray(bd.categories) ||
+                  bd.categories.length !== 4 ||
+                  !Array.isArray(bd.heaviestSteps) ||
+                  !Array.isArray(bd.activeSkills)
+                ) {
+                  breakdownProbeOk = false;
+                  breakdownProbeError = 'buildContextBreakdownForTranscript returned malformed payload';
+                }
+              } catch (bdErr) {
+                breakdownProbeOk = false;
+                breakdownProbeError = bdErr && bdErr.message ? bdErr.message : String(bdErr);
+              }
+            }
             const raw = fs.readFileSync(item.trPath, 'utf-8');
             const lines = raw.split(/\r?\n/).filter(Boolean).slice(-80);
             for (const line of lines) {
@@ -3618,6 +4166,9 @@ class AgyCockpitServer {
                 continue;
               }
               if (obj.type === 'USER_INPUT') userStepsCount += 1;
+              if (obj.type === 'GENERIC' && typeof obj.content === 'string' && obj.content.length > 0) {
+                genericStepsCount += 1;
+              }
               if (obj.type === 'PLANNER_RESPONSE') {
                 plannerStepsCount += 1;
                 if (
@@ -3637,6 +4188,10 @@ class AgyCockpitServer {
                 }
               }
               if (Array.isArray(obj.truncated_fields) && obj.truncated_fields.length > 0) {
+                truncatedStepsCount += 1;
+                if (/<truncated\s+\d+\s+bytes>/i.test(line)) {
+                  truncatedMarkerMatchedCount += 1;
+                }
                 const fullPath = path.join(path.dirname(item.trPath), 'transcript_full.jsonl');
                 if (!isFile(fullPath)) {
                   truncatedWithoutFullCount += 1;
@@ -3652,7 +4207,7 @@ class AgyCockpitServer {
           'transcript_schema',
           'Conversation Transcript JSONL Schema',
           'fail',
-          'server.cjs:processTranscriptLine, updateTranscriptEntry',
+          'server.cjs:processTranscriptLine, updateTranscriptEntry, buildContextBreakdownForTranscript',
           `Found ${convDirsChecked} conversation directories with .system_generated, but 0 logs/transcript.jsonl files.`,
           'Antigravity may have moved or renamed .system_generated/logs/transcript.jsonl. Update transcript path resolution in server.cjs.'
         );
@@ -3661,27 +4216,54 @@ class AgyCockpitServer {
           'transcript_schema',
           'Conversation Transcript JSONL Schema',
           'fail',
-          'server.cjs:processTranscriptLine',
+          'server.cjs:processTranscriptLine, buildContextBreakdownForTranscript',
           `Sampled ${transcriptsFound} transcript.jsonl files, but found 0 USER_INPUT or PLANNER_RESPONSE steps.`,
-          'Step type enum names in transcript.jsonl may have changed. Check processTranscriptLine() in server.cjs.'
+          'Step type enum names in transcript.jsonl may have changed. Check processTranscriptLine() and buildContextBreakdownForTranscript() in server.cjs.'
         );
       } else if (plannerStepsCount >= 3 && plannerWithTokensCount === 0) {
         addContract(
           'transcript_schema',
           'Conversation Transcript JSONL Schema',
           'warn',
-          'server.cjs:processTranscriptLine',
+          'server.cjs:processTranscriptLine, buildContextBreakdownForTranscript',
           `Found ${plannerStepsCount} PLANNER_RESPONSE steps across ${transcriptsFound} transcripts, but none had input_tokens/cache_read_tokens/output_tokens.`,
-          'Token usage field names in transcript.jsonl may have changed. Update token extraction in server.cjs:processTranscriptLine().'
+          'Token usage field names in transcript.jsonl may have changed. Update token extraction in server.cjs:processTranscriptLine() and buildContextBreakdownForTranscript().'
         );
       } else if (toolCallsCount >= 3 && validToolCallsCount === 0) {
         addContract(
           'transcript_schema',
           'Conversation Transcript JSONL Schema',
           'warn',
-          'server.cjs:classifyToolCallsWait, extractPathsFromToolCalls, processTranscriptLine',
+          'server.cjs:classifyToolCallsWait, extractPathsFromToolCalls, processTranscriptLine, buildContextBreakdownForTranscript',
           `Found ${toolCallsCount} tool_calls entries across ${transcriptsFound} transcripts, but none matched { name, args }.`,
-          'Tool call schema in PLANNER_RESPONSE changed. Update classifyToolCallsWait() and processTranscriptLine() in server.cjs.'
+          'Tool call schema in PLANNER_RESPONSE changed. Update classifyToolCallsWait(), processTranscriptLine(), and buildContextBreakdownForTranscript() in server.cjs.'
+        );
+      } else if (toolCallsCount >= 5 && genericStepsCount === 0) {
+        addContract(
+          'transcript_schema',
+          'Conversation Transcript JSONL Schema',
+          'warn',
+          'server.cjs:buildContextBreakdownForTranscript, processTranscriptLine',
+          `Found ${toolCallsCount} tool_calls across ${transcriptsFound} transcripts, but 0 GENERIC tool output steps.`,
+          'Tool output step type in transcript.jsonl may have changed from GENERIC. Update buildContextBreakdownForTranscript() and processTranscriptLine() in server.cjs.'
+        );
+      } else if (truncatedStepsCount >= 3 && truncatedMarkerMatchedCount === 0) {
+        addContract(
+          'transcript_schema',
+          'Conversation Transcript JSONL Schema',
+          'warn',
+          'server.cjs:estimateRawUtf8Bytes, buildContextBreakdownForTranscript, processTranscriptLine',
+          `Found ${truncatedStepsCount} steps with truncated_fields, but 0 matched the '<truncated N bytes>' marker format.`,
+          'Antigravity changed the truncation marker format in transcript.jsonl. Update TRUNCATED_BYTES_RE and estimateRawUtf8Bytes() in server.cjs.'
+        );
+      } else if (!breakdownProbeOk) {
+        addContract(
+          'transcript_schema',
+          'Conversation Transcript JSONL Schema',
+          'warn',
+          'server.cjs:buildContextBreakdownForTranscript, handleContextBreakdown',
+          `Context breakdown probe failed: ${breakdownProbeError}`,
+          'Inspect buildContextBreakdownForTranscript() in server.cjs.'
         );
       } else if (truncatedWithoutFullCount > 0) {
         addContract(
@@ -3697,8 +4279,8 @@ class AgyCockpitServer {
           'transcript_schema',
           'Conversation Transcript JSONL Schema',
           'pass',
-          'server.cjs:processTranscriptLine, classifyToolCallsWait',
-          `Verified ${transcriptsFound} recent transcript(s) (${userStepsCount} USER_INPUT, ${plannerWithTokensCount}/${plannerStepsCount} PLANNER_RESPONSE with tokens, ${validToolCallsCount}/${toolCallsCount} tool_calls).`
+          'server.cjs:processTranscriptLine, classifyToolCallsWait, buildContextBreakdownForTranscript',
+          `Verified ${transcriptsFound} recent transcript(s) (${userStepsCount} USER_INPUT, ${plannerWithTokensCount}/${plannerStepsCount} PLANNER_RESPONSE with tokens, ${validToolCallsCount}/${toolCallsCount} tool_calls, ${genericStepsCount} GENERIC outputs, ${truncatedMarkerMatchedCount}/${truncatedStepsCount} truncated markers, breakdown=ok).`
         );
       }
 
@@ -4621,6 +5203,39 @@ class AgyCockpitServer {
     };
   }
 
+  getGlobalObservedCeiling() {
+    if (this.cachedIndexSummary && this.cachedIndexSummary.globalObservedCeiling > 0) {
+      return this.cachedIndexSummary.globalObservedCeiling;
+    }
+    const allRecentCompactTokens = [];
+    const sortedEntries = [...this.convCache.values()].sort(
+      (a, b) => (b.lastActiveMs || 0) - (a.lastActiveMs || 0)
+    );
+    for (const e of sortedEntries) {
+      if (Array.isArray(e.compactTriggerTokens) && e.compactTriggerTokens.length > 0) {
+        allRecentCompactTokens.push(...e.compactTriggerTokens.slice(-5));
+        if (allRecentCompactTokens.length >= 25) break;
+      }
+    }
+    return computeMedian(allRecentCompactTokens);
+  }
+
+  handleContextBreakdown(query) {
+    const convId = (query.id || '').trim().toLowerCase();
+    if (!UUID_RE.test(convId)) {
+      return { status: 400, body: { error: 'Invalid conversation id' } };
+    }
+    const entry = this.refreshSingleEntry(convId) || this.convCache.get(convId) || null;
+    const transcriptPath = path.join(this.brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
+    if (!entry && !isFile(transcriptPath)) {
+      return { status: 404, body: { error: 'Conversation not found' } };
+    }
+    const localCeiling = entry ? computeMedian((entry.compactTriggerTokens || []).slice(-10)) : 0;
+    const observedCeiling = localCeiling || this.getGlobalObservedCeiling() || 0;
+    const body = buildContextBreakdownForTranscript(convId, transcriptPath, entry, observedCeiling);
+    return { status: 200, body };
+  }
+
   handleHandoffSummary(query) {
     const convId = (query.id || '').trim().toLowerCase();
     const focusTopic = (query.focus || '').trim();
@@ -4767,6 +5382,12 @@ class AgyCockpitServer {
 
     if (req.method === 'GET' && pathname === '/api/conversation-details') {
       const { status, body } = this.handleConversationDetails(query);
+      sendJson(res, status, body);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/context-breakdown') {
+      const { status, body } = this.handleContextBreakdown(query);
       sendJson(res, status, body);
       return;
     }
@@ -5209,5 +5830,8 @@ module.exports = {
   parseCascadeModelConfigs,
   parseUserQuotaSummary,
   buildQuotaFromModelConfigs,
-  classifyQuotaWindow
+  classifyQuotaWindow,
+  estimateRawUtf8Bytes,
+  cleanTranscriptArgString,
+  buildContextBreakdownForTranscript
 };
