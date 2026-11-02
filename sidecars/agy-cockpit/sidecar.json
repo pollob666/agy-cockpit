@@ -4,21 +4,21 @@
   ],
   "command": "node",
   "description": "Monitor conversation context pollution, compaction history, and git repository drift, with smart handoff to fresh chats.",
-  "display_name": "Context Health",
+  "display_name": "AGY Cockpit",
   "has_web_ui": true,
   "restart_policy": "always",
   "ui_config": {
-    "display_name": "Context Health",
+    "display_name": "AGY Cockpit",
     "views": [
       {
         "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
         "path": "/ui.html",
-        "title": "Context Health"
+        "title": "AGY Cockpit"
       },
       {
         "entrypoint": "SIDECAR_UI_ENTRYPOINT_SIDEBAR",
         "path": "/ui.html",
-        "title": "Context Health"
+        "title": "AGY Cockpit"
       }
     ]
   }

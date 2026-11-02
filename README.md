@@ -1,4 +1,4 @@
-# Antigravity Context Health (`context-health`)
+# AGY Cockpit (`agy-cockpit`)
 
 Cross-platform **Antigravity Plugin & Sidecar UI Pane** for **Windows** and **Linux** (pure Node.js, zero external dependencies).
 
@@ -8,10 +8,10 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 1. **Context Compaction (`CHECKPOINT` events)**: Each time a conversation hits the model's context window ceiling, Antigravity compacts older turns into a summary and retains only the last 10 user prompts verbatim. Repeated compactions gradually dilute earlier architectural constraints and debugging details.
 2. **Git Repository Drift (`commits behind HEAD`)**: When commits are created in another terminal, branch, or conversation, an older chat's mental model of the repository falls out of sync with `HEAD`.
 
-**Context Health** runs as a lightweight sidecar panel inside Antigravity (`Auxiliary Pane` and `Sidebar`). It monitors live context window usage, compaction tiers, cumulative token consumption (including spawned subagents), and Git drift across all your projects, and provides a **Two-Step Smart Handoff** to seamlessly continue work in a fresh conversation.
+**AGY Cockpit** runs as a lightweight sidecar panel inside Antigravity (`Auxiliary Pane` and `Sidebar`). It monitors live context window usage, compaction tiers, cumulative token consumption (including spawned subagents), and Git drift across all your projects, and provides a **Two-Step Smart Handoff** to seamlessly continue work in a fresh conversation.
 
 <p align="center">
-  <img src="screenshots/hero.png" alt="Context Health Sidecar Panel" width="620" />
+  <img src="screenshots/hero.png" alt="AGY Cockpit Sidecar Panel" width="620" />
 </p>
 
 ---
@@ -27,7 +27,7 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
   - `10+ compacts`: **Polluted** (`#ef4444`)
 
 <p align="center">
-  <img src="screenshots/compaction-tiers.gif" alt="Context Health Compaction Tiers (Fresh to Polluted)" width="617" />
+  <img src="screenshots/compaction-tiers.gif" alt="AGY Cockpit Compaction Tiers (Fresh to Polluted)" width="617" />
 </p>
 - **Prompt Retention Tracking**: Each Antigravity compaction retains the last 10 user prompts in full. When earlier prompts have been compacted, the active card displays `Prompts: 10 full · M compacted`.
 - **Dynamic Context Window Ceiling (Zero Hardcoded Limits)**:
@@ -40,7 +40,9 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
   - **New Input Tokens** (`input_tokens`)
   - **Cached Read Tokens** (`cache_read_tokens`)
   - **Output Tokens** (`output_tokens`)
-- Automatically links spawned subagent conversations (`invoke_subagent` / `sender=<uuid>`) to their parent chat, hiding subagents from the main conversation list while aggregating their token consumption (`+X.Xk sub`) on the parent conversation card.
+- Automatically links spawned subagent conversations (`invoke_subagent` / `sender=<uuid>`) to their parent chat, hiding subagents from the main conversation list while aggregating their token consumption on the parent conversation card.
+- **Interactive Subagent Pill & Inline Breakdown (`+X.Xk · N sub ▾`)**: Clicking the subagent pill expands an inline list showing each spawned subagent's `↳` role/title, token consumption, and live status (`Done`, thinking dots `•••`, or amber `! Waiting permission` / `? Waiting answer`). Clicking any subagent row opens that subagent's conversation directly in Antigravity.
+- **Live Subagent Status Propagation**: If a background subagent is actively thinking (`•••`) or waiting on tool permission (`!`) or a user answer (`?`), its status automatically propagates to the parent conversation card and project filter tab.
 
 ### 3. Git / Repository Drift Detection
 - Detects the Git repository root associated with each conversation and compares the conversation's last activity timestamp against `HEAD` (excluding commits created inside that conversation).
@@ -51,11 +53,11 @@ As an Antigravity conversation grows, two things silently degrade the agent's ef
 - **Project-Scoped Filter Tabs & Live Thinking / Waiting / Unread Indicators**: Syncs with `~/.gemini/config/projects/` and `window.sidecar.getWorkspaceUris()` (`onWorkspaceChange`) to scope the conversation list to the active project, with tabs to switch across projects or browse `All`. Project tabs and conversation cards display animated thinking dots (`•••`) while an agent is streaming or executing tools, amber `!` (waiting for permission approval) or `?` (waiting for your answer to a question) badges when stalled on user input, and an unread blue dot (`●`) once a background reply completes.
 - **Quick New Conversation (`+ New`)**: Spawn a new conversation directly from the filter bar inside the current/selected project workspace or as a general (`No Project`) chat without leaving the panel.
 - **Turn Previews (`You:` / `AI:`)**: Compact cards in `Other conversations` preview both your latest prompt (`You:`) and the model's latest response (`AI:`) on separate lines.
-- **Project & Conversation Archiving / Deletion**: Right-click any project tab to **Archive Project**, or use the bottom-right gear menu (`⚙`) on any conversation card to **Archive** it (restorable from `Archived (N)`) or permanently **Delete** it (`DeleteCascadeTrajectory` with confirmation).
+- **Conversation Pinning, Custom Renaming, Archiving & Deletion**: Right-click any project tab to **Archive Project**, or use the bottom-right gear menu (`⚙`) on any conversation card to **Pin to top** / **Unpin from top**, **Rename...** (with **Reset Default**), **Archive** (restorable from `Archived (N)`), or permanently **Delete** (`DeleteCascadeTrajectory` with confirmation).
 - **Instant Full-Text Search & Prompt History**: Filters conversations in real time across titles, `USER_INPUT` prompts, and `Task Overview` checkpoint summaries. Expanding `History & Commits` shows missed Git commits, the latest compact overview, and user prompts clamped to 3 lines (`Show more` / `Show less`).
 
 ### 5. Two-Step Smart Handoff & Dynamic Model Selector
-- **Step 1 (Optional Focus & AI Generation)**: Click **Smart Handoff** to open an editable focus box where you can optionally specify instructions for the next chat (such as focusing on a specific subtask or writing the handoff in another language), then click **Generate Handoff Prompt**. Context Health sends a `[Context Health Smart Handoff]` request to the conversation's agent instructing it to produce a self-contained `<HANDOFF_PROMPT>` without calling any tools.
+- **Step 1 (Optional Focus & AI Generation)**: Click **Smart Handoff** to open an editable focus box where you can optionally specify instructions for the next chat (such as focusing on a specific subtask or writing the handoff in another language), then click **Generate Handoff Prompt**. AGY Cockpit sends an `[AGY Cockpit Smart Handoff]` request to the conversation's agent instructing it to produce a self-contained `<HANDOFF_PROMPT>` without calling any tools.
 - **Step 2 (Review, Edit, Select Model & Launch)**: As soon as the agent replies, the extracted `<HANDOFF_PROMPT>` is loaded directly into the plugin's editor so you can review or edit it before clicking **Start New Chat** or **Copy**. Clearing the text box (for example with `Ctrl+A` and `Backspace`) automatically switches the drawer back to Step 1 (**Generate Handoff Prompt**) so you can enter new instructions and regenerate.
 - **Dynamic Model & Thinking Tier Selector**: Discovers all models and thinking tiers available to your account from the local Antigravity Language Server, pre-selects the active conversation's current model and thinking tier by default, and launches the new conversation directly with the chosen model and thinking tier from Step 0 inside the same project and workspace.
 
@@ -78,19 +80,20 @@ Requires **Node.js 18+**. Works out of the box on both **Windows** and **Linux**
 You can ask any Antigravity agent to install or update the plugin for you by pasting this prompt in chat:
 
 ```text
-Install the Context Health plugin from this repository by running `node setup.cjs` (use BypassSandbox: true so it can write to ~/.gemini/config/plugins/context-health), verify with `node setup.cjs --check`, and give me the Context Health sidecar pill link.
+Install the AGY Cockpit plugin from this repository by running `node setup.cjs` (use BypassSandbox: true so it can write to ~/.gemini/config/plugins/agy-cockpit), verify with `node setup.cjs --check` and `node setup.cjs --doctor`, and give me the AGY Cockpit sidecar pill link.
 ```
 
 #### Step-by-Step Instructions for AI Agents
-If you are an AI agent asked to install or update **Context Health** on a user's system (Windows or Linux):
+If you are an AI agent asked to install or update **AGY Cockpit** on a user's system (Windows or Linux):
 1. **Clone or locate the repository** (if not already open in the workspace).
 2. **Run the installer outside the sandbox**:
-   - Because [`setup.cjs`](./setup.cjs) installs files into `~/.gemini/config/plugins/context-health/` (outside the project workspace) and restarts the running sidecar process, execute `node setup.cjs` with `BypassSandbox: true` if standard sandbox mode blocks writes to `~/.gemini/config`.
-3. **Verify the installation**:
+   - Because [`setup.cjs`](./setup.cjs) installs files into `~/.gemini/config/plugins/agy-cockpit/` (outside the project workspace) and restarts the running sidecar process, execute `node setup.cjs` with `BypassSandbox: true` if standard sandbox mode blocks writes to `~/.gemini/config`.
+3. **Verify the installation & runtime contracts**:
    - Run `node setup.cjs --check` and confirm the JSON output reports `"pluginInstalled": true`, `"readmeInstalled": true`, and `"sidecarInstalled": true`.
+   - Run `node setup.cjs --doctor` and confirm all 9 contracts pass.
 4. **Surface the sidecar pill & restart notice**:
-   - Always include the clickable pill link in your response: `[Context Health](sidecar://context-health/context-health/ui.html)`
-   - If this is a **first-time installation** (creating `~/.gemini/config/plugins/context-health` for the first time), inform the user to **restart or reload Antigravity** once so Antigravity discovers the new plugin directory.
+   - Always include the clickable pill link in your response: `[AGY Cockpit](sidecar://agy-cockpit/agy-cockpit/ui.html)`
+   - If this is a **first-time installation** (creating `~/.gemini/config/plugins/agy-cockpit` for the first time), inform the user to **restart or reload Antigravity** once so Antigravity discovers the new plugin directory.
    - If this is an **update** to an existing installation, no Antigravity restart is needed (`setup.cjs` automatically restarts `server.cjs` and the UI hot-reloads).
 
 ### Option B: Manual CLI Installation
@@ -110,7 +113,7 @@ node setup.cjs --doctor
 
 ### Updating When New Commits Are Pushed
 
-Because Antigravity runs the plugin from `~/.gemini/config/plugins/context-health/`, pulling new commits in the git repository requires re-running `node setup.cjs` to sync the updated files and auto-restart the sidecar server:
+Because Antigravity runs the plugin from `~/.gemini/config/plugins/agy-cockpit/`, pulling new commits in the git repository requires re-running `node setup.cjs` to sync the updated files and auto-restart the sidecar server:
 
 ```bash
 git pull
@@ -119,31 +122,31 @@ node setup.cjs
 
 ### Uninstalling
 
-To stop the sidecar server and remove the plugin from `~/.gemini/config/plugins/context-health`:
+To stop the sidecar server and remove the plugin from `~/.gemini/config/plugins/agy-cockpit`:
 
 ```bash
 node setup.cjs --uninstall
 ```
 
 ### Opening the Panel in Antigravity
-Once installed, **Context Health** is automatically enabled and available in:
+Once installed, **AGY Cockpit** is automatically enabled and available in:
 - The right **Auxiliary Pane** (`Extensions` / sidecar tab)
 - The left **Sidebar** (`Plugins` section)
-- Any Antigravity chat response via the pill link: `[Context Health](sidecar://context-health/context-health/ui.html)`
+- Any Antigravity chat response via the pill link: `[AGY Cockpit](sidecar://agy-cockpit/agy-cockpit/ui.html)`
 
 > [!IMPORTANT]
 > **Portability Note (How to Share or Move Across Machines)**:
-> Always install on a new Windows or Linux machine by cloning this repository and running `node setup.cjs`. Do **not** copy the installed `~/.gemini/config/plugins/context-health/` folder directly from one computer to another, because `setup.cjs` writes the host machine's resolved Node.js executable path (`process.execPath`, such as an `nvm` or `nvm4w` binary path) into the installed `sidecar.json` so GUI launches can always locate `node`.
+> Always install on a new Windows or Linux machine by cloning this repository and running `node setup.cjs`. Do **not** copy the installed `~/.gemini/config/plugins/agy-cockpit/` folder directly from one computer to another, because `setup.cjs` writes the host machine's resolved Node.js executable path (`process.execPath`, such as an `nvm` or `nvm4w` binary path) into the installed `sidecar.json` so GUI launches can always locate `node`.
 
 ---
 
 ## Performance Architecture
 
 1. **Incremental Append-Only Transcript Indexing**:
-   - [`server.cjs`](./sidecars/context-health/server.cjs) caches `mtimeMs`, `size`, and `parsedBytes` per conversation in memory and persists `index_cache.json`.
+   - [`server.cjs`](./sidecars/agy-cockpit/server.cjs) caches `mtimeMs`, `size`, and `parsedBytes` per conversation in memory and persists `index_cache.json`.
    - On subsequent polls, only newly appended bytes (`stat.size - parsedBytes`) are read from disk, and `"type":"GENERIC"` lines are skipped before `JSON.parse` (`< 1 ms` per status poll on warm cache).
 2. **Git Reflog Tail Parser + `.git/HEAD` Mtime Guard**:
-   - [`server.cjs`](./sidecars/context-health/server.cjs) inspects `.git/HEAD` and `.git/logs/HEAD` `mtimeMs` with a 1.5s TTL before reading Git state.
+   - [`server.cjs`](./sidecars/agy-cockpit/server.cjs) inspects `.git/HEAD` and `.git/logs/HEAD` `mtimeMs` with a 1.5s TTL before reading Git state.
 
 ---
 
@@ -153,12 +156,12 @@ Once installed, **Context Health** is automatically enabled and available in:
 .
 ├── plugin.json                       # Antigravity plugin manifest (auto-enables sidecar)
 ├── sidecars/
-│   └── context-health/
+│   └── agy-cockpit/
 │       ├── sidecar.json              # Antigravity sidecar manifest (AUX_PANE + SIDEBAR)
 │       ├── server.cjs                # HTTP + incremental transcript, token & git indexing server
 │       └── ui.html                   # Auxiliary pane & sidebar UI
 ├── screenshots/
-│   ├── hero.png                      # Full Context Health panel preview
+│   ├── hero.png                      # Full AGY Cockpit panel preview
 │   ├── compaction-tiers.gif          # Animated progression across compaction tiers
 │   └── smart-handoff.png             # Smart Handoff editor with Model & Thinking Tier selector
 ├── setup.cjs                         # Cross-platform installer & updater (Windows & Linux)

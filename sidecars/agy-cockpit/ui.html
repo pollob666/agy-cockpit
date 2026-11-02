@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Context Health</title>
+  <title>AGY Cockpit</title>
   <script src="/preload.js"></script>
   <style>
     :root {
@@ -242,6 +242,30 @@
       border-top: 1px solid var(--border, rgba(255, 255, 255, 0.06));
     }
 
+    .tokens-total-wrap { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .subagent-pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      background: var(--secondary, rgba(255, 255, 255, 0.06)); color: var(--muted-foreground, #a0a0a0);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.12)); border-radius: 999px;
+      padding: 1px 8px; font: 500 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      cursor: pointer; transition: color 0.12s, background 0.12s, border-color 0.12s;
+    }
+    .subagent-pill:hover, .subagent-pill.active {
+      color: var(--foreground, #ededed); background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.22);
+    }
+    .subagents-list { display: flex; flex-direction: column; gap: 4px; width: 100%; margin-top: 4px; }
+    .subagent-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 5px 8px; background: var(--background, #0a0a0a);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.07)); border-radius: 6px;
+      font-size: 12px; cursor: pointer; transition: background 0.12s, border-color 0.12s;
+    }
+    .subagent-row:hover { background: var(--secondary, rgba(255, 255, 255, 0.05)); border-color: rgba(255, 255, 255, 0.16); }
+    .subagent-left { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+    .subagent-title { color: var(--foreground, #ededed); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .subagent-right { display: flex; align-items: center; gap: 5px; flex-shrink: 0; font-size: 11.5px; color: var(--muted-foreground, #888888); }
+    .subagent-status-wait { color: #fbbf24; font-weight: 500; }
+
     .actions-bar {
       display: flex;
       align-items: center;
@@ -455,35 +479,6 @@
       flex-wrap: wrap;
     }
 
-    .new-chat-scope-chips {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      flex-wrap: wrap;
-    }
-
-    .scope-chip {
-      background: transparent;
-      color: var(--muted-foreground, #888888);
-      border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
-      border-radius: 999px;
-      padding: 2px 9px;
-      font-size: 11.5px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: color 0.12s, background 0.12s, border-color 0.12s;
-    }
-
-    .scope-chip:hover {
-      color: var(--foreground, #ededed);
-    }
-
-    .scope-chip.active {
-      background: rgba(59, 130, 246, 0.16);
-      color: #93c5fd;
-      border-color: rgba(59, 130, 246, 0.45);
-    }
-
     .new-chat-textarea {
       width: 100%;
       min-height: 68px;
@@ -636,10 +631,10 @@
       background: var(--card, #141414);
       border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
       border-radius: 8px;
-      padding: 11px 13px;
+      padding: 9px 12px 6px;
       display: flex;
       flex-direction: column;
-      gap: 7px;
+      gap: 5px;
       transition: border-color 0.12s;
     }
 
@@ -654,7 +649,7 @@
     .conv-row-header {
       display: flex;
       flex-direction: column;
-      gap: 7px;
+      gap: 5px;
     }
 
     .conv-row:hover {
@@ -685,6 +680,14 @@
       flex: 1;
     }
 
+    .pin-icon {
+      width: 11px;
+      height: 11px;
+      color: var(--foreground, #ededed);
+      opacity: 0.58;
+      flex-shrink: 0;
+    }
+
     .conv-title {
       font-size: 13.5px;
       font-weight: 600;
@@ -698,9 +701,9 @@
     .conv-previews {
       display: flex;
       flex-direction: column;
-      gap: 2px;
+      gap: 1px;
       cursor: pointer;
-      margin-top: -2px;
+      margin-top: -1px;
     }
 
     .conv-msg-line {
@@ -747,7 +750,7 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
+      gap: 3px 8px;
       flex-wrap: wrap;
     }
 
@@ -773,6 +776,12 @@
       width: 100%;
     }
 
+    .conv-row .conv-actions .ghost-btn {
+      padding: 1px 7px;
+      font-size: 12px;
+      line-height: 1.25;
+    }
+
     .card-menu-wrap {
       position: relative;
       display: inline-flex;
@@ -784,16 +793,17 @@
     }
 
     .gear-btn {
-      padding: 2px 6px;
+      padding: 1px 5px;
       font-size: 13px;
-      line-height: 1.2;
+      line-height: 1.15;
     }
 
     .card-menu {
       position: absolute;
       right: 0;
       bottom: calc(100% + 4px);
-      min-width: 118px;
+      min-width: 148px;
+      white-space: nowrap;
       background: var(--card, #181818);
       border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
       border-radius: 7px;
@@ -805,6 +815,29 @@
       z-index: 200;
     }
 
+    .ctx-menu {
+      position: fixed;
+      min-width: 168px;
+      max-width: 280px;
+      white-space: nowrap;
+      background: var(--card, #181818);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
+      border-radius: 7px;
+      padding: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.65);
+      z-index: 9400;
+    }
+
+    .ctx-menu-sep,
+    .card-menu-sep {
+      height: 1px;
+      background: var(--border, rgba(255, 255, 255, 0.12));
+      margin: 3px 2px;
+    }
+
     .card-menu-item {
       background: transparent;
       border: none;
@@ -814,6 +847,9 @@
       font-size: 12.5px;
       color: var(--foreground, #ededed);
       cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
       transition: background 0.12s;
     }
 
@@ -1134,6 +1170,25 @@
       text-overflow: ellipsis;
     }
 
+    .modal-input {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 8px;
+      background: var(--background, #0a0a0a);
+      color: var(--foreground, #ededed);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-family: inherit;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.12s;
+    }
+
+    .modal-input:focus {
+      border-color: var(--muted-foreground, #888888);
+    }
+
     .modal-actions {
       display: flex;
       align-items: center;
@@ -1303,7 +1358,7 @@
       <div class="topbar">
         <div class="brand">
           <span class="dot" id="status-dot"></span>
-          <span class="brand-title">Context Health</span>
+          <span class="brand-title">AGY Cockpit</span>
           <span class="brand-ws" id="active-workspace-indicator"></span>
         </div>
         <button class="ghost-btn" id="btn-refresh" title="Refresh">Refresh</button>
@@ -1340,6 +1395,7 @@
   </div>
 
   <div class="diag-sticky" id="diag-sticky" style="display:none;"></div>
+  <div class="ctx-menu" id="ctx-menu" style="display:none;"></div>
   <div class="modal-backdrop" id="modal-backdrop"></div>
   <div class="toast" id="toast"></div>
 
@@ -1404,6 +1460,7 @@
         diagRechecking: false,
         dismissedDiagSig: initialDismissedDiagSig,
         expandedDetails: new Map(),
+        expandedSubagents: new Set(),
         expandedPromptKeys: new Set(),
         openHandoffId: null,
         pendingSmartHandoff: null,
@@ -1412,11 +1469,13 @@
         newChatOpen: false,
         newChatText: '',
         newChatGeneral: false,
+        newChatTargetKey: '',
         newChatSending: false
       };
 
       const appShellEl = document.getElementById('app-shell');
       const diagStickyEl = document.getElementById('diag-sticky');
+      const ctxMenuEl = document.getElementById('ctx-menu');
       const pinnedContainer = document.getElementById('pinned-container');
       const cardsContainer = document.getElementById('cards-container');
       const workspacePillsEl = document.getElementById('workspace-pills');
@@ -1568,35 +1627,6 @@
 
         let html = '<div class="drawer">';
 
-        if (Array.isArray(details.missedCommits) && details.missedCommits.length > 0) {
-          html += '<div class="drawer-subtitle">Missed commits (' + details.commitsBehind + ' behind HEAD)</div>';
-          html += '<div class="commits-list" data-scroll-key="' + escapeHtml(card.id + ':commits') + '">';
-          for (const c of details.missedCommits) {
-            html +=
-              '<div class="commit-row">' +
-                '<span class="commit-sha">' + escapeHtml(c.short) + '</span>' +
-                '<span class="commit-subj">' + escapeHtml(c.subject) + '</span>' +
-                '<span class="muted">' + escapeHtml(formatRelativeTime(c.tsMs || c.iso)) + '</span>' +
-              '</div>';
-          }
-          html += '</div>';
-        }
-
-        if (details.checkpointOverview) {
-          const ovKey = card.id + ':overview';
-          const ovExpanded = state.expandedPromptKeys.has(ovKey);
-          html +=
-            '<div class="drawer-subtitle">Latest compact overview</div>' +
-            '<div class="prompt-item">' +
-              '<div class="prompt-item-text' + (ovExpanded ? ' expanded' : '') + '" data-scroll-key="' + escapeHtml(ovKey) + '">' +
-                escapeHtml(details.checkpointOverview) +
-              '</div>' +
-              '<button class="expand-link" data-action="toggle-clamp" data-expand-key="' + escapeHtml(ovKey) + '">' +
-                (ovExpanded ? 'Show less' : 'Show more') +
-              '</button>' +
-            '</div>';
-        }
-
         const prompts = Array.isArray(details.prompts) ? details.prompts : [];
         html += '<div class="drawer-subtitle">User prompts (' + prompts.length + ')</div>';
         if (prompts.length === 0) {
@@ -1624,6 +1654,35 @@
           html += '</div>';
         }
 
+        if (details.checkpointOverview) {
+          const ovKey = card.id + ':overview';
+          const ovExpanded = state.expandedPromptKeys.has(ovKey);
+          html +=
+            '<div class="drawer-subtitle">Latest compact overview</div>' +
+            '<div class="prompt-item">' +
+              '<div class="prompt-item-text' + (ovExpanded ? ' expanded' : '') + '" data-scroll-key="' + escapeHtml(ovKey) + '">' +
+                escapeHtml(details.checkpointOverview) +
+              '</div>' +
+              '<button class="expand-link" data-action="toggle-clamp" data-expand-key="' + escapeHtml(ovKey) + '">' +
+                (ovExpanded ? 'Show less' : 'Show more') +
+              '</button>' +
+            '</div>';
+        }
+
+        if (Array.isArray(details.missedCommits) && details.missedCommits.length > 0) {
+          html += '<div class="drawer-subtitle">Missed commits (' + details.commitsBehind + ' behind HEAD)</div>';
+          html += '<div class="commits-list" data-scroll-key="' + escapeHtml(card.id + ':commits') + '">';
+          for (const c of details.missedCommits) {
+            html +=
+              '<div class="commit-row">' +
+                '<span class="commit-sha">' + escapeHtml(c.short) + '</span>' +
+                '<span class="commit-subj">' + escapeHtml(c.subject) + '</span>' +
+                '<span class="muted">' + escapeHtml(formatRelativeTime(c.tsMs || c.iso)) + '</span>' +
+              '</div>';
+          }
+          html += '</div>';
+        }
+
         html += '</div>';
         return html;
       }
@@ -1634,11 +1693,45 @@
           st = {
             step: 'focus',
             text: '',
-            selectedModelEnum: null
+            selectedModelEnum: null,
+            loadedHandoffMs: 0,
+            dismissedHandoffMs: 0,
+            cancelledPending: false
           };
           state.handoffStateByConv.set(convId, st);
         }
         return st;
+      }
+
+      function syncConversationHandoffState(conv) {
+        if (!conv || !conv.id) return false;
+        if (state.pendingSmartHandoff && state.pendingSmartHandoff.convId === conv.id) {
+          return false;
+        }
+        const promptText = (conv.latestHandoffPrompt || '').trim();
+        const handoffMs = Number(conv.latestHandoffMs) || 0;
+        if (!promptText || handoffMs <= 0) return false;
+
+        const hState = getHandoffState(conv.id);
+        if (hState.cancelledPending) {
+          hState.dismissedHandoffMs = Math.max(hState.dismissedHandoffMs || 0, handoffMs);
+          return false;
+        }
+        const baselineMs = Math.max(hState.loadedHandoffMs || 0, hState.dismissedHandoffMs || 0);
+        if (handoffMs <= baselineMs) return false;
+
+        hState.text = promptText;
+        hState.step = 'ready';
+        hState.loadedHandoffMs = handoffMs;
+        state.scrollPositions.set(conv.id + ':handoff', 0);
+        return true;
+      }
+
+      function syncAllHandoffStates() {
+        if (!Array.isArray(state.conversations)) return;
+        for (const conv of state.conversations) {
+          syncConversationHandoffState(conv);
+        }
       }
 
       function parseLabelFamilyAndTier(label) {
@@ -1761,8 +1854,8 @@
       }
 
       function renderHandoffDrawer(card) {
+        if (state.openHandoffId !== card.id) return '';
         const isPending = Boolean(state.pendingSmartHandoff && state.pendingSmartHandoff.convId === card.id);
-        if (!isPending && state.openHandoffId !== card.id) return '';
 
         const hState = getHandoffState(card.id);
         const idEsc = escapeHtml(card.id);
@@ -1828,11 +1921,72 @@
         );
       }
 
+      const PIN_ICON_SVG =
+        '<svg class="pin-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" title="Pinned to top" aria-label="Pinned"><line x1="12" y1="17" x2="12" y2="22"></line><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path></svg>';
+
+      function renderStatusBadge(item, includeUnread) {
+        if (item.waitState === 'permission' || item.waitState === 'question') {
+          const isQ = item.waitState === 'question';
+          const baseTip = isQ ? 'Waiting for your answer' : 'Waiting for permission approval';
+          const tip = item.waitToolName ? baseTip + ' (' + item.waitToolName + ')' : baseTip;
+          return '<span class="wait-badge" title="' + escapeHtml(tip) + '">' + (isQ ? '?' : '!') + '</span>';
+        }
+        if (item.isThinking) {
+          return '<span class="thinking-dots" title="Agent is thinking"><span></span><span></span><span></span></span>';
+        }
+        if (includeUnread && item.unread) {
+          return '<span class="unread-dot" title="Unread reply"></span>';
+        }
+        return '';
+      }
+
+      function renderSubagentPill(card, fallbackSpan) {
+        const subList = Array.isArray(card.subagents) ? card.subagents : [];
+        const subTok = Number(card.subagentTokens) || 0;
+        if (subList.length > 0) {
+          const isOpen = state.expandedSubagents.has(card.id);
+          const label = '+' + formatTokens(subTok) + ' · ' + subList.length + ' sub ' + (isOpen ? '▴' : '▾');
+          return (
+            '<button type="button" class="subagent-pill' + (isOpen ? ' active' : '') + '" data-action="toggle-subagents" data-id="' + escapeHtml(card.id) + '" title="Show/hide spawned subagents">' +
+              escapeHtml(label) +
+            '</button>'
+          );
+        }
+        return fallbackSpan && subTok > 0 ? '<span>(+' + escapeHtml(formatTokens(subTok)) + ' sub)</span>' : '';
+      }
+
+      function renderSubagentsList(card) {
+        const subList = Array.isArray(card.subagents) ? card.subagents : [];
+        if (subList.length === 0 || !state.expandedSubagents.has(card.id)) return '';
+        let html = '<div class="subagents-list">';
+        for (const sub of subList) {
+          const subTitle = sub.title || ('Subagent ' + String(sub.id || '').slice(0, 8));
+          const badge = renderStatusBadge(sub, false);
+          const statusHtml = sub.waitState
+            ? badge + '<span class="subagent-status-wait">' + (sub.waitState === 'question' ? 'Waiting answer' : 'Waiting permission') + '</span>'
+            : (badge || '<span>Done</span>');
+          html +=
+            '<div class="subagent-row" data-action="open-subagent" data-id="' + escapeHtml(sub.id) + '" title="Open subagent conversation: ' + escapeHtml(subTitle) + '">' +
+              '<div class="subagent-left">' +
+                '<span class="muted">↳</span>' +
+                '<span class="subagent-title">' + escapeHtml(subTitle) + '</span>' +
+              '</div>' +
+              '<div class="subagent-right">' +
+                '<span class="mono">' + escapeHtml(formatTokens(Number(sub.totalTokens) || 0) + ' tok') + '</span>' +
+                '<span>·</span>' +
+                statusHtml +
+              '</div>' +
+            '</div>';
+        }
+        return html + '</div>';
+      }
+
       function renderActiveCardHeader(card) {
         const tier = getCardTier(card);
         statusDotEl.className = 'dot ' + tier.dot;
 
-        const titleText = card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
+        const titleText = card.customTitle || card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
+        const pinIconHtml = card.pinned ? PIN_ICON_SVG : '';
 
         let gitStatusHtml = '';
         if (card.git && card.git.hasGit) {
@@ -1873,7 +2027,6 @@
         const totalOutTok = Number(card.totalOutputTokens) || 0;
         const subTok = Number(card.subagentTokens) || 0;
 
-        const totalLabel = formatTokens(totalTok) + ' tok' + (subTok > 0 ? ' (+' + formatTokens(subTok) + ' sub)' : '');
         const breakdownLabel =
           formatTokens(totalInTok) + ' new in · ' +
           formatTokens(totalCacheTok) + ' cached · ' +
@@ -1887,23 +2040,13 @@
           ')';
 
         const isDetailsOpen = state.expandedDetails.has(card.id);
-        const isHandoffOpen =
-          state.openHandoffId === card.id ||
-          Boolean(state.pendingSmartHandoff && state.pendingSmartHandoff.convId === card.id);
-
-        let activeBadgeHtml = '';
-        if (card.waitState === 'permission') {
-          activeBadgeHtml = '<span class="wait-badge" title="Waiting for permission approval">!</span>';
-        } else if (card.waitState === 'question') {
-          activeBadgeHtml = '<span class="wait-badge" title="Waiting for your answer">?</span>';
-        } else if (card.isThinking) {
-          activeBadgeHtml = '<span class="thinking-dots" title="Agent is thinking"><span></span><span></span><span></span></span>';
-        }
+        const isHandoffOpen = state.openHandoffId === card.id;
 
         return (
-          '<div class="conv-row-top" data-action="open-chat" data-id="' + escapeHtml(card.id) + '" title="Switch to this conversation">' +
+          '<div class="conv-row-top" data-action="open-chat" data-id="' + escapeHtml(card.id) + '">' +
             '<div class="conv-title-wrap">' +
-              activeBadgeHtml +
+              renderStatusBadge(card, false) +
+              pinIconHtml +
               '<span class="conv-title">' + escapeHtml(titleText) + '</span>' +
             '</div>' +
             '<span class="muted">' + escapeHtml(formatRelativeTime(card.lastActiveMs)) + '</span>' +
@@ -1935,18 +2078,22 @@
             '<div class="tokens-summary" title="' + escapeHtml(exactTooltip) + '">' +
               '<div class="meter-head">' +
                 '<span class="muted">Total tokens used</span>' +
-                '<span class="mono">' + escapeHtml(totalLabel) + '</span>' +
+                '<span class="mono tokens-total-wrap">' +
+                  '<span>' + escapeHtml(formatTokens(totalTok) + ' tok') + '</span>' +
+                  renderSubagentPill(card, true) +
+                '</span>' +
               '</div>' +
               '<div class="meter-foot">' +
                 '<span>' + escapeHtml(breakdownLabel) + '</span>' +
               '</div>' +
             '</div>' +
+            renderSubagentsList(card) +
           '</div>' +
 
           '<div class="actions-bar">' +
             '<div class="actions-left">' +
               '<button class="btn-solid" data-action="toggle-handoff" data-id="' + escapeHtml(card.id) + '">' +
-                (isHandoffOpen ? 'Close Handoff' : 'Smart Handoff') +
+                (isHandoffOpen ? 'Hide Handoff' : 'Smart Handoff') +
               '</button>' +
             '</div>' +
             '<div class="conv-actions">' +
@@ -1961,13 +2108,22 @@
 
       function renderCardGearMenu(card) {
         const idEsc = escapeHtml(card.id);
-        const titleEsc = escapeHtml(card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8)));
+        const displayTitle = card.customTitle || card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
+        const defaultTitle = card.defaultTitle || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
+        const titleEsc = escapeHtml(displayTitle);
+        const defaultTitleEsc = escapeHtml(defaultTitle);
+        const isPinned = Boolean(card.pinned);
         const isMenuOpen = state.openMenuConvId === card.id;
         return (
           '<div class="card-menu-wrap">' +
             '<button class="ghost-btn gear-btn" data-action="toggle-card-menu" data-id="' + idEsc + '" title="Conversation actions" aria-label="Conversation actions">⚙</button>' +
             (isMenuOpen
               ? '<div class="card-menu">' +
+                  '<button class="card-menu-item" data-action="toggle-pin-conv" data-id="' + idEsc + '" data-pinned="' + (isPinned ? '1' : '0') + '">' +
+                    (isPinned ? 'Unpin from top' : 'Pin to top') +
+                  '</button>' +
+                  '<button class="card-menu-item" data-action="prompt-rename-conv" data-id="' + idEsc + '" data-title="' + titleEsc + '" data-default-title="' + defaultTitleEsc + '">Rename...</button>' +
+                  '<div class="ctx-menu-sep"></div>' +
                   '<button class="card-menu-item" data-action="archive-conv" data-id="' + idEsc + '">Archive</button>' +
                   '<button class="card-menu-item danger" data-action="prompt-delete-conv" data-id="' + idEsc + '" data-title="' + titleEsc + '">Delete</button>' +
                 '</div>'
@@ -1978,20 +2134,10 @@
 
       function renderCompactRowHeader(card, showWorkspaceName) {
         const tier = getCardTier(card);
-        const titleText = card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
+        const titleText = card.customTitle || card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
+        const pinIconHtml = card.pinned ? PIN_ICON_SVG : '';
         const userMsgText = (card.lastPrompt || card.firstPrompt || '').trim();
         const aiMsgText = (card.lastModelResponse || '').trim();
-
-        let statusBadgeHtml = '';
-        if (card.waitState === 'permission') {
-          statusBadgeHtml = '<span class="wait-badge" title="Waiting for permission approval">!</span>';
-        } else if (card.waitState === 'question') {
-          statusBadgeHtml = '<span class="wait-badge" title="Waiting for your answer">?</span>';
-        } else if (card.isThinking) {
-          statusBadgeHtml = '<span class="thinking-dots" title="Agent is thinking"><span></span><span></span><span></span></span>';
-        } else if (card.unread) {
-          statusBadgeHtml = '<span class="unread-dot" title="Unread reply"></span>';
-        }
 
         let previewsHtml = '';
         const showUserLine = Boolean(userMsgText);
@@ -2056,9 +2202,7 @@
           searchHitsHtml += '</div>';
         }
 
-        const isHandoffOpen =
-          state.openHandoffId === card.id ||
-          Boolean(state.pendingSmartHandoff && state.pendingSmartHandoff.convId === card.id);
+        const isHandoffOpen = state.openHandoffId === card.id;
         const isDetailsOpen = state.expandedDetails.has(card.id);
 
         const tokNoteHtml = card.totalTokens > 0
@@ -2066,9 +2210,10 @@
           : '';
 
         return (
-          '<div class="conv-row-top" data-action="open-chat" data-id="' + escapeHtml(card.id) + '" title="Switch to this conversation">' +
+          '<div class="conv-row-top" data-action="open-chat" data-id="' + escapeHtml(card.id) + '">' +
             '<div class="conv-title-wrap">' +
-              statusBadgeHtml +
+              renderStatusBadge(card, true) +
+              pinIconHtml +
               '<span class="conv-title">' + escapeHtml(titleText) + '</span>' +
             '</div>' +
             '<span class="muted">' + escapeHtml(formatRelativeTime(card.lastActiveMs)) + '</span>' +
@@ -2082,12 +2227,14 @@
               '</span>' +
               '<span>· ' + card.promptCount + ' prompts' + escapeHtml(compactedNote) + '</span>' +
               tokNoteHtml +
+              renderSubagentPill(card, false) +
               gitNoteHtml +
               wsNoteHtml +
             '</div>' +
+            renderSubagentsList(card) +
             '<div class="conv-actions">' +
               '<button class="ghost-btn" data-action="toggle-handoff" data-id="' + escapeHtml(card.id) + '">' +
-                (isHandoffOpen ? 'Close' : 'Handoff') +
+                (isHandoffOpen ? 'Hide Handoff' : 'Handoff') +
               '</button>' +
               '<button class="ghost-btn" data-action="toggle-details" data-id="' + escapeHtml(card.id) + '">' +
                 (isDetailsOpen ? 'Hide' : 'History') +
@@ -2122,11 +2269,13 @@
 
         const handoffSlot = cardEl.querySelector('.card-handoff-slot');
         const isPending = Boolean(state.pendingSmartHandoff && state.pendingSmartHandoff.convId === card.id);
-        const hState = state.handoffStateByConv.get(card.id);
-        const stepTag = hState && hState.step === 'ready' ? 'ready' : 'focus';
-        const wantHandoff = isPending
-          ? 'pending'
-          : (state.openHandoffId === card.id ? stepTag : '0');
+        const hState = state.openHandoffId === card.id
+          ? getHandoffState(card.id)
+          : state.handoffStateByConv.get(card.id);
+        const stepTag = hState && hState.step === 'ready' ? 'ready:' + (hState.loadedHandoffMs || 0) : 'focus';
+        const wantHandoff = state.openHandoffId === card.id
+          ? (isPending ? 'pending' : stepTag)
+          : '0';
         if (handoffSlot && handoffSlot.getAttribute('data-open') !== wantHandoff) {
           handoffSlot.setAttribute('data-open', wantHandoff);
           handoffSlot.innerHTML = wantHandoff !== '0' ? renderHandoffDrawer(card) : '';
@@ -2159,6 +2308,14 @@
       }
 
       function resolveNewChatTargetWorkspace(effectiveScope, pinnedCard) {
+        if (
+          state.newChatTargetKey &&
+          state.newChatTargetKey !== '__all__' &&
+          state.newChatTargetKey !== '__unscoped__'
+        ) {
+          const explicitWs = state.workspaces.find((w) => w.key === state.newChatTargetKey);
+          if (explicitWs) return explicitWs;
+        }
         if (effectiveScope && effectiveScope !== '__all__' && effectiveScope !== '__unscoped__') {
           const ws = state.workspaces.find((w) => w.key === effectiveScope);
           if (ws) return ws;
@@ -2193,9 +2350,25 @@
 
         const targetWs = resolveNewChatTargetWorkspace(effectiveScope, pinnedCard);
         const hasProjectTarget = Boolean(targetWs && (targetWs.projectId || targetWs.path));
-        const isGeneral = !hasProjectTarget || Boolean(state.newChatGeneral);
+        const isGeneral =
+          state.newChatTargetKey === '__unscoped__' ||
+          !hasProjectTarget ||
+          Boolean(state.newChatGeneral);
+
+        const projectWorkspaces = [];
+        const seenWsKeys = new Set();
+        for (const w of state.workspaces) {
+          if (w && w.key && w.key !== '__unscoped__' && (w.projectId || w.path)) {
+            seenWsKeys.add(w.key);
+            projectWorkspaces.push(w);
+          }
+        }
+        if (hasProjectTarget && targetWs.key && !seenWsKeys.has(targetWs.key)) {
+          projectWorkspaces.unshift(targetWs);
+        }
 
         const scopeKey = [
+          projectWorkspaces.map((w) => w.key).join(','),
           hasProjectTarget ? (targetWs.key || targetWs.name) : 'none',
           isGeneral ? 'general' : 'project',
           state.newChatSending ? 'sending' : 'idle'
@@ -2211,22 +2384,26 @@
           state.newChatText = activeTa.value;
         }
 
-        let chipsHtml = '';
-        if (hasProjectTarget) {
-          chipsHtml +=
-            '<button class="scope-chip ' + (!isGeneral ? 'active' : '') + '" data-action="set-new-chat-scope" data-general="0" title="' + escapeHtml(targetWs.path || targetWs.name) + '">' +
-              'Project: ' + escapeHtml(targetWs.name) +
-            '</button>';
+        let selectOptsHtml = '';
+        for (const w of projectWorkspaces) {
+          const isSel = !isGeneral && targetWs && w.key === targetWs.key ? ' selected' : '';
+          selectOptsHtml +=
+            '<option value="' + escapeHtml(w.key) + '"' + isSel + '>' +
+              escapeHtml(w.name) +
+            '</option>';
         }
-        chipsHtml +=
-          '<button class="scope-chip ' + (isGeneral ? 'active' : '') + '" data-action="set-new-chat-scope" data-general="1" title="Start a general conversation outside any project">' +
-            'General (No Project)' +
-          '</button>';
+        selectOptsHtml +=
+          '<option value="__unscoped__"' + (isGeneral ? ' selected' : '') + '>No Project (General)</option>';
 
         newChatSlotEl.innerHTML =
           '<div class="new-chat-drawer" data-scope-key="' + escapeHtml(scopeKey) + '">' +
             '<div class="new-chat-scope-row">' +
-              '<div class="new-chat-scope-chips">' + chipsHtml + '</div>' +
+              '<div class="handoff-model-group" style="flex:1;min-width:0;">' +
+                '<span class="handoff-model-label">Project</span>' +
+                '<select class="handoff-select" id="new-chat-project-select" style="max-width:100%;flex:1;min-width:0;">' +
+                  selectOptsHtml +
+                '</select>' +
+              '</div>' +
             '</div>' +
             '<textarea class="new-chat-textarea" id="new-chat-textarea" placeholder="Write a prompt to start a new conversation... (Ctrl+Enter to send)"' + (state.newChatSending ? ' readonly' : '') + '>' +
               escapeHtml(state.newChatText) +
@@ -2286,8 +2463,8 @@
             ? ' data-project-id="' + escapeHtml(ws.projectId) + '" data-project-name="' + escapeHtml(ws.name) + '"'
             : '';
           const tip = ws.projectId
-            ? (ws.path ? ws.path + ' · Right-click to archive project' : 'Right-click to archive project')
-            : (ws.path || '');
+            ? (ws.path ? ws.path + ' · Right-click for options' : 'Right-click for options')
+            : (ws.path ? ws.path + ' · Right-click to start new chat' : 'Right-click to start new chat');
           let indicatorHtml = '';
           if (hasWaitPerm) {
             indicatorHtml += '<span class="wait-badge" title="Waiting for permission approval in this project">!</span>';
@@ -2302,7 +2479,7 @@
             indicatorHtml += '<span class="unread-dot" title="Unread reply in this project"></span>';
           }
           html +=
-            '<button class="scope-tab ' + (isActive ? 'active' : '') + '" data-ws="' + escapeHtml(ws.key) + '"' + projAttrs + ' title="' + escapeHtml(tip) + '">' +
+            '<button class="scope-tab ' + (isActive ? 'active' : '') + '" data-ws="' + escapeHtml(ws.key) + '" data-ws-name="' + escapeHtml(ws.name) + '"' + projAttrs + ' title="' + escapeHtml(tip) + '">' +
               indicatorHtml +
               '<span>' + escapeHtml(ws.name) + ' (' + otherCount + ')</span>' +
             '</button>';
@@ -2405,6 +2582,7 @@
         const pinnedId = pinnedCard ? pinnedCard.id : '';
         if (state.lastPinnedId && pinnedId && state.lastPinnedId !== pinnedId) {
           state.selectedWorkspaceKey = '__auto__';
+          clearSearchState();
           const isOldPending = Boolean(
             state.pendingSmartHandoff && state.pendingSmartHandoff.convId === state.lastPinnedId
           );
@@ -2453,6 +2631,16 @@
           }
           return true;
         });
+        filtered.sort((a, b) => {
+          const aPin = Boolean(a.pinned);
+          const bPin = Boolean(b.pinned);
+          if (aPin !== bPin) return aPin ? -1 : 1;
+          if (aPin && bPin) {
+            const pinDiff = (Number(b.pinnedAtMs) || 0) - (Number(a.pinnedAtMs) || 0);
+            if (pinDiff !== 0) return pinDiff;
+          }
+          return (Number(b.lastActiveMs) || 0) - (Number(a.lastActiveMs) || 0);
+        });
 
         const wsObj = state.workspaces.find((w) => w.key === effectiveScope);
         const scopeTitle = effectiveScope === '__all__'
@@ -2496,13 +2684,15 @@
             }
           }
 
-          const anyRowHasOpenDrawer = filtered.some(
-            (c) =>
-              state.openHandoffId === c.id ||
-              Boolean(state.pendingSmartHandoff && state.pendingSmartHandoff.convId === c.id) ||
-              state.expandedDetails.has(c.id) ||
-              state.openMenuConvId === c.id
-          );
+          const activeInCards =
+            document.activeElement &&
+            cardsContainer.contains(document.activeElement) &&
+            (document.activeElement.tagName === 'TEXTAREA' ||
+              document.activeElement.tagName === 'INPUT' ||
+              document.activeElement.tagName === 'SELECT');
+          const anyRowHasOpenMenuOrFocus =
+            Boolean(activeInCards) ||
+            filtered.some((c) => state.openMenuConvId === c.id);
 
           for (let i = 0; i < filtered.length; i++) {
             const c = filtered[i];
@@ -2512,7 +2702,7 @@
               existingById.set(c.id, rowEl);
               cardsContainer.appendChild(rowEl);
             }
-            if (!anyRowHasOpenDrawer && cardsContainer.children[i] !== rowEl) {
+            if (!anyRowHasOpenMenuOrFocus && cardsContainer.children[i] !== rowEl) {
               cardsContainer.insertBefore(rowEl, cardsContainer.children[i] || null);
             }
             syncCardDom(rowEl, c, renderCompactRowHeader(c, showWsName));
@@ -2654,7 +2844,7 @@
         const issues = diag && Array.isArray(diag.issues) ? diag.issues : [];
         if (issues.length === 0) return;
         const lines = [
-          'Context Health Contract Verifier detected Antigravity (AGY) API/schema drift:',
+          'AGY Cockpit Contract Verifier detected Antigravity (AGY) API/schema drift:',
           ''
         ];
         for (const item of issues) {
@@ -2725,10 +2915,11 @@
           state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
           state.searchMatches = data.searchMatches || null;
 
+          syncAllHandoffStates();
           renderAll();
           await checkPendingSmartHandoff();
         } catch (err) {
-          console.error('[ContextHealth] status poll failed:', err);
+          console.error('[AgyCockpit] status poll failed:', err);
         } finally {
           state.pollInFlight = false;
           state.lastPollDoneMs = Date.now();
@@ -2820,8 +3011,30 @@
         return { data, focus };
       }
 
-      function cancelPendingSmartHandoff() {
+      function cancelPendingSmartHandoff(abortRemote = false) {
+        const pending = state.pendingSmartHandoff;
         state.pendingSmartHandoff = null;
+        if (pending && pending.convId) {
+          const card = state.conversations.find((c) => c.id === pending.convId);
+          const hState = getHandoffState(pending.convId);
+          hState.step = 'focus';
+          hState.cancelledPending = true;
+          hState.dismissedHandoffMs = Math.max(
+            hState.dismissedHandoffMs || 0,
+            hState.loadedHandoffMs || 0,
+            pending.baselineHandoffMs || 0,
+            (card && Number(card.latestHandoffMs)) || 0,
+            Date.now()
+          );
+          if (abortRemote) {
+            apiFetch('/api/cancel-invocation', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ conversationId: pending.convId })
+            }).catch(() => {});
+            showToast('Cancelled handoff generation');
+          }
+        }
         renderAll();
       }
 
@@ -2830,7 +3043,7 @@
         if (!pending || pending.completing) return;
 
         if (Date.now() - pending.requestedAtMs > 180000) {
-          cancelPendingSmartHandoff();
+          cancelPendingSmartHandoff(false);
           showToast('Smart handoff timed out waiting for agent response');
           return;
         }
@@ -2849,21 +3062,20 @@
         const convId = pending.convId;
         const finalPrompt = conv.latestHandoffPrompt;
         const hState = getHandoffState(convId);
+        hState.cancelledPending = false;
         hState.text = finalPrompt;
         hState.step = 'ready';
-        state.openHandoffId = convId;
+        hState.loadedHandoffMs = Math.max(Number(conv.latestHandoffMs) || 0, (pending.baselineHandoffMs || 0) + 1);
         state.scrollPositions.set(convId + ':handoff', 0);
+        state.pendingSmartHandoff = null;
 
-        cancelPendingSmartHandoff();
-        const activeTa = document.querySelector('textarea.handoff-input[data-focus-conv="' + convId + '"]');
-        if (activeTa) {
-          activeTa.focus();
-        }
+        renderAll();
         showToast('AI handoff prompt ready for review');
       }
 
       async function handleSmartHandoffRun(convId) {
         const card = state.conversations.find((c) => c.id === convId);
+        const hState = getHandoffState(convId);
         const focus = readCurrentHandoffText(convId).trim();
         state.openHandoffId = convId;
 
@@ -2871,9 +3083,17 @@
           const { data } = await fetchHandoffData(convId, focus);
 
           if (window.sidecar && window.sidecar.agent && typeof window.sidecar.agent.sendMessage === 'function') {
+            const baselineHandoffMs = Math.max(
+              (card && Number(card.latestHandoffMs)) || 0,
+              Number(data.latestHandoffMs) || 0,
+              hState.loadedHandoffMs || 0,
+              hState.dismissedHandoffMs || 0
+            );
+            hState.cancelledPending = false;
+            hState.loadedHandoffMs = baselineHandoffMs;
             state.pendingSmartHandoff = {
               convId,
-              baselineHandoffMs: Math.max((card && card.latestHandoffMs) || 0, data.latestHandoffMs || 0),
+              baselineHandoffMs,
               baselinePromptText: data.latestHandoffPrompt || (card && card.latestHandoffPrompt) || '',
               requestedAtMs: Date.now(),
               completing: false
@@ -2888,8 +3108,8 @@
               showToast('Agent is drafting smart handoff...');
               return;
             } catch (agentErr) {
-              cancelPendingSmartHandoff();
-              console.warn('[ContextHealth] agent sendMessage failed:', agentErr);
+              cancelPendingSmartHandoff(false);
+              console.warn('[AgyCockpit] agent sendMessage failed:', agentErr);
               showToast('Agent unavailable: ' + agentErr.message);
               return;
             }
@@ -2898,7 +3118,7 @@
           await copyTextToClipboard(data.promptForAgentHandoff || '');
           showToast('Copied handoff request to clipboard');
         } catch (err) {
-          cancelPendingSmartHandoff();
+          cancelPendingSmartHandoff(false);
           showToast('Error starting smart handoff: ' + err.message);
         }
       }
@@ -2924,13 +3144,20 @@
             },
             () => {
               state.openHandoffId = null;
-              state.handoffStateByConv.delete(convId);
+              const hState = getHandoffState(convId);
+              hState.step = 'focus';
+              hState.text = '';
+              hState.dismissedHandoffMs = Math.max(
+                hState.dismissedHandoffMs || 0,
+                hState.loadedHandoffMs || 0,
+                (card && Number(card.latestHandoffMs)) || 0
+              );
             }
           );
           showToast('Started new conversation with handoff!');
           return;
         } catch (chatErr) {
-          console.warn('[ContextHealth] startConversation failed, falling back to clipboard:', chatErr);
+          console.warn('[AgyCockpit] startConversation failed, falling back to clipboard:', chatErr);
           await copyTextToClipboard(promptText);
           showToast('Could not start chat automatically; copied prompt to clipboard');
           return;
@@ -2999,7 +3226,7 @@
         const effectiveScope = resolveEffectiveWorkspaceScope(pinnedCard);
         const targetWs = resolveNewChatTargetWorkspace(effectiveScope, pinnedCard);
         const hasProjectTarget = Boolean(targetWs && (targetWs.projectId || targetWs.path));
-        const isGeneral = !hasProjectTarget || Boolean(state.newChatGeneral);
+        const isGeneral = state.newChatTargetKey === '__unscoped__' || !hasProjectTarget || Boolean(state.newChatGeneral);
 
         const preferredModelEnum =
           (pinnedCard && pinnedCard.modelEnum) ||
@@ -3023,6 +3250,8 @@
               state.newChatSending = false;
               state.newChatOpen = false;
               state.newChatText = '';
+              state.newChatTargetKey = '';
+              state.newChatGeneral = false;
             }
           );
           showToast(isGeneral ? 'Started new general conversation!' : 'Started new conversation!');
@@ -3066,6 +3295,144 @@
           if (sameWs.length > 0) return sameWs[0];
         }
         return remaining[0];
+      }
+
+      async function handlePinConversation(convId, nextPinned) {
+        if (!convId) return;
+        state.openMenuConvId = null;
+        const card = state.conversations.find((c) => c.id === convId);
+        if (card) {
+          card.pinned = Boolean(nextPinned);
+          card.pinnedAtMs = nextPinned ? Date.now() : 0;
+        }
+        renderAll();
+        try {
+          const res = await apiFetch('/api/pin-conversation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: convId, pinned: Boolean(nextPinned) })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) {
+            throw new Error(data.error || 'Failed to update pin');
+          }
+          await fetchStatus(true);
+          showToast(nextPinned ? 'Pinned conversation to top' : 'Unpinned conversation');
+        } catch (err) {
+          await fetchStatus(true);
+          showToast('Error: ' + err.message);
+        }
+      }
+
+      function openRenameConvModal(convId, fallbackTitle, fallbackDefault) {
+        if (!modalBackdropEl || !convId) return;
+        state.openMenuConvId = null;
+        renderAll();
+        const card = state.conversations.find((c) => c.id === convId);
+        const currentTitle =
+          (card && (card.customTitle || card.title || card.firstPrompt || card.lastPrompt)) ||
+          fallbackTitle ||
+          ('Conversation ' + convId.slice(0, 8));
+        const defaultTitle =
+          (card && (card.defaultTitle || card.firstPrompt || card.lastPrompt)) ||
+          fallbackDefault ||
+          ('Conversation ' + convId.slice(0, 8));
+        modalBackdropEl.innerHTML =
+          '<div class="modal-card" role="dialog" aria-modal="true">' +
+            '<div class="modal-title">Rename Conversation</div>' +
+            '<div class="modal-body">' +
+              'Set a custom title for this conversation in AGY Cockpit:' +
+              '<input type="text" class="modal-input" id="rename-conv-input" data-id="' + escapeHtml(convId) + '" value="' + escapeHtml(currentTitle) + '" placeholder="' + escapeHtml(defaultTitle) + '" autocomplete="off">' +
+            '</div>' +
+            '<div class="modal-actions" style="justify-content: space-between;">' +
+              '<button class="btn-secondary" data-action="reset-rename-conv" data-id="' + escapeHtml(convId) + '">Reset Default</button>' +
+              '<div style="display:flex;gap:6px;">' +
+                '<button class="btn-secondary" data-action="close-modal">Cancel</button>' +
+                '<button class="btn-primary" data-action="confirm-rename-conv" data-id="' + escapeHtml(convId) + '">Save</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+        modalBackdropEl.classList.add('open');
+        const inputEl = document.getElementById('rename-conv-input');
+        if (inputEl) {
+          inputEl.focus();
+          inputEl.select();
+        }
+      }
+
+      async function handleRenameConversation(convId, newTitle) {
+        if (!convId) return;
+        const cleanTitle = typeof newTitle === 'string' ? newTitle.trim() : '';
+        try {
+          const res = await apiFetch('/api/rename-conversation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: convId, title: cleanTitle })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) {
+            throw new Error(data.error || 'Failed to rename conversation');
+          }
+          closeModal();
+          await fetchStatus(true);
+          showToast(cleanTitle ? 'Renamed conversation' : 'Restored default title');
+        } catch (err) {
+          closeModal();
+          showToast('Error: ' + err.message);
+        }
+      }
+
+      function closeProjectContextMenu() {
+        if (!ctxMenuEl) return;
+        ctxMenuEl.style.display = 'none';
+        ctxMenuEl.innerHTML = '';
+      }
+
+      function openProjectContextMenu(clientX, clientY, wsKey, wsName, projId) {
+        if (!ctxMenuEl || !wsKey || wsKey === '__all__') return;
+        state.openMenuConvId = null;
+        const displayLabel = wsKey === '__unscoped__' ? 'No Project' : (wsName || 'Project');
+        let html =
+          '<button class="card-menu-item" data-action="ctx-new-chat" data-ws-key="' + escapeHtml(wsKey) + '">' +
+            '<span>+ New chat in "' + escapeHtml(displayLabel) + '"</span>' +
+          '</button>';
+        if (projId && wsKey !== '__unscoped__') {
+          html +=
+            '<div class="ctx-menu-sep"></div>' +
+            '<button class="card-menu-item" data-action="ctx-archive-project" data-project-id="' + escapeHtml(projId) + '" data-project-name="' + escapeHtml(wsName || '') + '" data-ws-key="' + escapeHtml(wsKey) + '">' +
+              '<span>Archive "' + escapeHtml(displayLabel) + '"</span>' +
+            '</button>';
+        }
+        ctxMenuEl.innerHTML = html;
+        ctxMenuEl.style.display = 'flex';
+        ctxMenuEl.style.left = '0px';
+        ctxMenuEl.style.top = '0px';
+        const rect = ctxMenuEl.getBoundingClientRect();
+        const maxLeft = Math.max(6, window.innerWidth - rect.width - 6);
+        const maxTop = Math.max(6, window.innerHeight - rect.height - 6);
+        const left = Math.min(Math.max(6, clientX), maxLeft);
+        const top = Math.min(Math.max(6, clientY), maxTop);
+        ctxMenuEl.style.left = left + 'px';
+        ctxMenuEl.style.top = top + 'px';
+      }
+
+      function openNewConvModal(targetScope) {
+        closeProjectContextMenu();
+        const ta = document.getElementById('new-chat-textarea');
+        if (ta) state.newChatText = ta.value;
+        const scopeKey = targetScope || '__unscoped__';
+        state.selectedWorkspaceKey = scopeKey;
+        state.newChatTargetKey = scopeKey;
+        state.newChatGeneral = scopeKey === '__unscoped__';
+        state.newChatOpen = true;
+        if (sectionOtherEl && sectionOtherEl.classList.contains('collapsed')) {
+          sectionOtherEl.classList.remove('collapsed');
+        }
+        renderAll();
+        const nextTa = document.getElementById('new-chat-textarea');
+        if (nextTa) {
+          nextTa.focus();
+        }
       }
 
       async function handleSetConversationArchived(convId, archived) {
@@ -3163,6 +3530,7 @@
             throw new Error(data.error || 'Failed to delete conversation');
           }
           state.expandedDetails.delete(convId);
+          state.expandedSubagents.delete(convId);
           state.handoffStateByConv.delete(convId);
           if (state.openHandoffId === convId) state.openHandoffId = null;
           await fetchStatus(true);
@@ -3194,7 +3562,7 @@
           '<div class="modal-card" role="dialog" aria-modal="true">' +
             '<div class="modal-title">Archive project "' + safeName + '"?</div>' +
             '<div class="modal-body">' +
-              'This will temporarily hide <strong>' + safeName + '</strong> and its conversations from both the Antigravity sidebar and Context Health. Nothing is deleted, and you can unarchive it anytime.' +
+              'This will temporarily hide <strong>' + safeName + '</strong> and its conversations from both the Antigravity sidebar and AGY Cockpit. Nothing is deleted, and you can unarchive it anytime.' +
             '</div>' +
             '<div class="modal-actions">' +
               '<button class="btn-secondary" data-action="close-modal">Cancel</button>' +
@@ -3283,23 +3651,30 @@
       }
 
       document.addEventListener('contextmenu', (e) => {
-        const wsBtn = e.target.closest('[data-ws][data-project-id]');
+        const wsBtn = e.target.closest('.scope-tab[data-ws]');
         if (wsBtn) {
-          e.preventDefault();
-          const projId = wsBtn.getAttribute('data-project-id');
-          const projName = wsBtn.getAttribute('data-project-name') || '';
           const wsKey = wsBtn.getAttribute('data-ws') || '';
-          openArchiveConfirmModal(projId, projName, wsKey);
-          return;
+          if (wsKey && wsKey !== '__all__') {
+            e.preventDefault();
+            const projId = wsBtn.getAttribute('data-project-id') || '';
+            const wsName = wsBtn.getAttribute('data-ws-name') || wsBtn.getAttribute('data-project-name') || '';
+            openProjectContextMenu(e.clientX, e.clientY, wsKey, wsName, projId);
+            return;
+          }
         }
         const archBtn = e.target.closest('[data-action="open-archived-modal"]');
         if (archBtn) {
           e.preventDefault();
+          closeProjectContextMenu();
           openArchivedModal();
         }
       });
 
       document.addEventListener('click', async (e) => {
+        if (ctxMenuEl && ctxMenuEl.style.display !== 'none' && !e.target.closest('#ctx-menu')) {
+          closeProjectContextMenu();
+        }
+
         if (modalBackdropEl && e.target === modalBackdropEl) {
           closeModal();
           return;
@@ -3316,8 +3691,10 @@
           state.selectedWorkspaceKey = nextWs;
           if (state.newChatOpen) {
             if (nextWs === '__unscoped__') {
+              state.newChatTargetKey = '__unscoped__';
               state.newChatGeneral = true;
             } else if (nextWs && nextWs !== '__all__') {
+              state.newChatTargetKey = nextWs;
               state.newChatGeneral = false;
             }
           }
@@ -3330,6 +3707,19 @@
         const action = actionBtn.getAttribute('data-action');
         const convId = actionBtn.getAttribute('data-id');
 
+        if (action === 'ctx-new-chat') {
+          const wsKey = actionBtn.getAttribute('data-ws-key') || '__unscoped__';
+          openNewConvModal(wsKey);
+          return;
+        }
+        if (action === 'ctx-archive-project') {
+          const projId = actionBtn.getAttribute('data-project-id');
+          const projName = actionBtn.getAttribute('data-project-name') || '';
+          const wsKey = actionBtn.getAttribute('data-ws-key') || '';
+          closeProjectContextMenu();
+          openArchiveConfirmModal(projId, projName, wsKey);
+          return;
+        }
         if (action === 'close-modal') {
           closeModal();
           return;
@@ -3377,8 +3767,30 @@
           return;
         }
         if (action === 'toggle-card-menu' && convId) {
+          closeProjectContextMenu();
           state.openMenuConvId = state.openMenuConvId === convId ? null : convId;
           renderAll();
+          return;
+        }
+        if (action === 'toggle-pin-conv' && convId) {
+          const nextPinned = actionBtn.getAttribute('data-pinned') !== '1';
+          handlePinConversation(convId, nextPinned);
+          return;
+        }
+        if (action === 'prompt-rename-conv' && convId) {
+          const cTitle = actionBtn.getAttribute('data-title') || '';
+          const dTitle = actionBtn.getAttribute('data-default-title') || '';
+          openRenameConvModal(convId, cTitle, dTitle);
+          return;
+        }
+        if (action === 'reset-rename-conv' && convId) {
+          handleRenameConversation(convId, '');
+          return;
+        }
+        if (action === 'confirm-rename-conv' && convId) {
+          const inputEl = document.getElementById('rename-conv-input');
+          const nextTitle = inputEl ? inputEl.value : '';
+          handleRenameConversation(convId, nextTitle);
           return;
         }
         if (action === 'archive-conv' && convId) {
@@ -3403,6 +3815,23 @@
           const ta = document.getElementById('new-chat-textarea');
           if (ta) state.newChatText = ta.value;
           state.newChatOpen = !state.newChatOpen;
+          if (!state.newChatOpen) {
+            state.newChatTargetKey = '';
+            state.newChatGeneral = false;
+          } else {
+            const pinnedCard = state.conversations.find((c) => c.id === state.lastPinnedId) || null;
+            const effectiveScope = resolveEffectiveWorkspaceScope(pinnedCard);
+            if (effectiveScope === '__unscoped__') {
+              state.newChatTargetKey = '__unscoped__';
+              state.newChatGeneral = true;
+            } else if (effectiveScope && effectiveScope !== '__all__') {
+              state.newChatTargetKey = effectiveScope;
+              state.newChatGeneral = false;
+            } else {
+              state.newChatTargetKey = '';
+              state.newChatGeneral = false;
+            }
+          }
           if (state.newChatOpen && sectionOtherEl && sectionOtherEl.classList.contains('collapsed')) {
             sectionOtherEl.classList.remove('collapsed');
           }
@@ -3411,15 +3840,6 @@
             const nextTa = document.getElementById('new-chat-textarea');
             if (nextTa) nextTa.focus();
           }
-          return;
-        }
-        if (action === 'set-new-chat-scope') {
-          const ta = document.getElementById('new-chat-textarea');
-          if (ta) state.newChatText = ta.value;
-          state.newChatGeneral = actionBtn.getAttribute('data-general') === '1';
-          renderAll();
-          const nextTa = document.getElementById('new-chat-textarea');
-          if (nextTa) nextTa.focus();
           return;
         }
         if (action === 'submit-new-chat') {
@@ -3443,6 +3863,7 @@
           const curId = state.lastPinnedId || state.hostConvId;
           if (convId !== curId) {
             state.selectedWorkspaceKey = '__auto__';
+            clearSearchState();
           }
           if (!initialHostConvId) {
             const targetCard = state.conversations.find((c) => c.id === convId);
@@ -3453,28 +3874,38 @@
           renderAll();
           claimActiveConversation(convId);
           openConversationInHost(convId);
+        } else if (action === 'toggle-subagents' && convId) {
+          if (state.expandedSubagents.has(convId)) state.expandedSubagents.delete(convId);
+          else state.expandedSubagents.add(convId);
+          renderAll();
+        } else if (action === 'open-subagent' && convId) {
+          openConversationInHost(convId);
         } else if (action === 'toggle-details' && convId) {
           toggleDetails(convId);
         } else if (action === 'toggle-handoff' && convId) {
-          if (state.pendingSmartHandoff && state.pendingSmartHandoff.convId === convId) {
-            cancelPendingSmartHandoff();
+          const onPinnedCard = Boolean(actionBtn.closest('#pinned-container'));
+          const currentTargetId = onPinnedCard && state.lastPinnedId ? state.lastPinnedId : convId;
+          if (state.openHandoffId && (!state.pendingSmartHandoff || state.pendingSmartHandoff.convId !== state.openHandoffId)) {
+            readCurrentHandoffText(state.openHandoffId);
+          }
+          if (state.openHandoffId === currentTargetId) {
             state.openHandoffId = null;
             renderAll();
           } else {
-            const onPinnedCard = Boolean(actionBtn.closest('#pinned-container'));
             if (onPinnedCard && (Date.now() - state.lastPollDoneMs) > 250) {
               await fetchStatus(false);
             }
             const targetConvId = onPinnedCard && state.lastPinnedId ? state.lastPinnedId : convId;
-            const opening = state.openHandoffId !== targetConvId;
-            state.openHandoffId = opening ? targetConvId : null;
-            renderAll();
-            if (opening) {
-              ensureModelsLoaded(targetConvId, false);
+            const targetConv = state.conversations.find((c) => c.id === targetConvId);
+            if (targetConv) {
+              syncConversationHandoffState(targetConv);
             }
+            state.openHandoffId = targetConvId;
+            renderAll();
+            ensureModelsLoaded(targetConvId, false);
           }
-        } else if (action === 'cancel-pending-handoff') {
-          cancelPendingSmartHandoff();
+        } else if (action === 'cancel-pending-handoff' || action === 'cancel-handoff') {
+          cancelPendingSmartHandoff(true);
         } else if (action === 'handoff-smart-run' && convId) {
           handleSmartHandoffRun(convId);
         } else if (action === 'handoff-start-chat' && convId) {
@@ -3498,6 +3929,17 @@
       document.addEventListener('change', (e) => {
         const target = e.target;
         if (!target || !target.classList) return;
+        if (target.id === 'new-chat-project-select') {
+          const ta = document.getElementById('new-chat-textarea');
+          if (ta) state.newChatText = ta.value;
+          const nextKey = target.value || '__unscoped__';
+          state.newChatTargetKey = nextKey;
+          state.newChatGeneral = nextKey === '__unscoped__';
+          renderAll();
+          const nextTa = document.getElementById('new-chat-textarea');
+          if (nextTa) nextTa.focus();
+          return;
+        }
         const convId = target.getAttribute('data-conv-id');
         if (!convId) return;
         const card = state.conversations.find((c) => c.id === convId);
@@ -3533,8 +3975,14 @@
           const hState = getHandoffState(convId);
           hState.text = e.target.value;
           if (hState.step === 'ready' && e.target.value.trim() === '') {
+            const card = state.conversations.find((c) => c.id === convId);
             hState.step = 'focus';
             hState.text = '';
+            hState.dismissedHandoffMs = Math.max(
+              hState.dismissedHandoffMs || 0,
+              hState.loadedHandoffMs || 0,
+              (card && Number(card.latestHandoffMs)) || 0
+            );
             state.scrollPositions.set(convId + ':handoff', 0);
             renderAll();
             const nextTa = document.querySelector('textarea.handoff-input[data-focus-conv="' + convId + '"]');
@@ -3546,15 +3994,31 @@
       });
 
       document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && ctxMenuEl && ctxMenuEl.style.display !== 'none') {
+          e.preventDefault();
+          closeProjectContextMenu();
+          return;
+        }
         if (e.key === 'Escape' && modalBackdropEl && modalBackdropEl.classList.contains('open')) {
           e.preventDefault();
           closeModal();
+          return;
+        }
+        if (e.target && e.target.id === 'rename-conv-input') {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const convId = e.target.getAttribute('data-id');
+            if (convId) {
+              handleRenameConversation(convId, e.target.value);
+            }
+          }
           return;
         }
         if (e.target && e.target.id === 'new-chat-textarea') {
           if (e.key === 'Escape') {
             e.preventDefault();
             state.newChatOpen = false;
+            state.newChatTargetKey = '';
             renderAll();
           } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
@@ -3629,8 +4093,21 @@
         return Boolean(document.hidden || isIframeCollapsed());
       }
 
+      function clearSearchState() {
+        clearTimeout(searchTimer);
+        const hadSearch = Boolean(state.searchQuery || (searchInput && searchInput.value) || state.searchMatches);
+        state.searchQuery = '';
+        state.lastFetchedQuery = '';
+        state.searchMatches = null;
+        if (searchInput && searchInput.value) {
+          searchInput.value = '';
+        }
+        return hadSearch;
+      }
+
       function resetTransientScopeAndDrawers() {
-        let needRender = false;
+        closeProjectContextMenu();
+        let needRender = clearSearchState();
         if (state.selectedWorkspaceKey !== '__auto__') {
           state.selectedWorkspaceKey = '__auto__';
           needRender = true;
@@ -3641,6 +4118,20 @@
         }
         if (state.openMenuConvId) {
           state.openMenuConvId = null;
+          needRender = true;
+        }
+        if (state.expandedDetails.size > 0) {
+          state.expandedDetails.clear();
+          needRender = true;
+        }
+        if (state.expandedSubagents.size > 0) {
+          state.expandedSubagents.clear();
+          needRender = true;
+        }
+        if (state.newChatOpen && !state.newChatSending) {
+          state.newChatOpen = false;
+          state.newChatTargetKey = '';
+          state.newChatGeneral = false;
           needRender = true;
         }
         if (needRender) {

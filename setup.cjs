@@ -14,12 +14,12 @@ const GEMINI_CONFIG_DIR = process.env.ANTIGRAVITY_CONFIG_DIR
 
 const PLUGIN_SRC_FILE = path.join(REPO_ROOT, 'plugin.json');
 const README_SRC_FILE = path.join(REPO_ROOT, 'README.md');
-const SIDECAR_SRC_DIR = path.join(REPO_ROOT, 'sidecars', 'context-health');
+const SIDECAR_SRC_DIR = path.join(REPO_ROOT, 'sidecars', 'agy-cockpit');
 
-const LEGACY_SIDECAR_DIR = path.join(GEMINI_CONFIG_DIR, 'sidecars', 'context-health');
-const PLUGIN_DEST_DIR = path.join(GEMINI_CONFIG_DIR, 'plugins', 'context-health');
-const SIDECAR_DEST_DIR = path.join(PLUGIN_DEST_DIR, 'sidecars', 'context-health');
-const LEGACY_HOOK_DEST_FILE = path.join(SIDECAR_DEST_DIR, 'context-health-check.cjs');
+const LEGACY_SIDECAR_DIR = path.join(GEMINI_CONFIG_DIR, 'sidecars', 'agy-cockpit');
+const PLUGIN_DEST_DIR = path.join(GEMINI_CONFIG_DIR, 'plugins', 'agy-cockpit');
+const SIDECAR_DEST_DIR = path.join(PLUGIN_DEST_DIR, 'sidecars', 'agy-cockpit');
+const LEGACY_HOOK_DEST_FILE = path.join(SIDECAR_DEST_DIR, 'agy-cockpit-check.cjs');
 const HOOKS_JSON_FILE = path.join(GEMINI_CONFIG_DIR, 'hooks.json');
 
 function resolveNodeExecutable() {
@@ -67,9 +67,9 @@ function findServerInfoCandidates() {
   }
   for (const appDir of appDirs) {
     candidates.push(
-      path.join(appDir, 'sidecar_data', 'context-health', 'context-health', 'data', 'server_info.json'),
-      path.join(appDir, 'sidecar_data', 'context-health', 'data', 'server_info.json'),
-      path.join(appDir, 'sidecar_data', 'context-health', 'server.json')
+      path.join(appDir, 'sidecar_data', 'agy-cockpit', 'agy-cockpit', 'data', 'server_info.json'),
+      path.join(appDir, 'sidecar_data', 'agy-cockpit', 'data', 'server_info.json'),
+      path.join(appDir, 'sidecar_data', 'agy-cockpit', 'server.json')
     );
   }
   return candidates;
@@ -96,7 +96,7 @@ function restartRunningSidecarServer() {
     try {
       const psScript =
         "Get-CimInstance Win32_Process -Filter \"Name = 'node.exe'\" | " +
-        "Where-Object { $_.CommandLine -match 'context-health.*[\\\\/]server\\.cjs(\\s|$|\")' } | " +
+        "Where-Object { $_.CommandLine -match 'agy-cockpit.*[\\\\/]server\\.cjs(\\s|$|\")' } | " +
         "Select-Object -ExpandProperty ProcessId";
       const out = execFileSync(
         'powershell.exe',
@@ -117,7 +117,7 @@ function restartRunningSidecarServer() {
     try {
       const out = execFileSync(
         'pgrep',
-        ['-f', 'context-health.*/server\\.cjs'],
+        ['-f', 'agy-cockpit.*/server\\.cjs'],
         { encoding: 'utf-8', timeout: 3000 }
       );
       for (const line of String(out || '').split(/\r?\n/)) {
@@ -141,8 +141,8 @@ function removeLegacyHookRegistration() {
   }
   if (fs.existsSync(HOOKS_JSON_FILE)) {
     const hooksConfig = readExistingHooksJson();
-    if ('context-health' in hooksConfig) {
-      delete hooksConfig['context-health'];
+    if ('agy-cockpit' in hooksConfig) {
+      delete hooksConfig['agy-cockpit'];
       fs.writeFileSync(HOOKS_JSON_FILE, JSON.stringify(hooksConfig, null, 2) + '\n', 'utf-8');
     }
   }
@@ -180,12 +180,12 @@ function installAll() {
   removeLegacyHookRegistration();
   restartRunningSidecarServer();
 
-  console.log('[context-health] Installed successfully:');
+  console.log('[agy-cockpit] Installed successfully:');
   console.log('  Platform      :', `${process.platform} (${process.arch})`);
   console.log('  Node binary   :', nodeBin);
   console.log('  Plugin dir    :', PLUGIN_DEST_DIR);
   console.log('  Sidecar dir   :', SIDECAR_DEST_DIR);
-  console.log('  Sidecar pill  : [Context Health](sidecar://context-health/context-health/ui.html)');
+  console.log('  Sidecar pill  : [AGY Cockpit](sidecar://agy-cockpit/agy-cockpit/ui.html)');
 }
 
 function uninstallAll() {
@@ -197,7 +197,7 @@ function uninstallAll() {
   if (fs.existsSync(PLUGIN_DEST_DIR)) {
     fs.rmSync(PLUGIN_DEST_DIR, { recursive: true, force: true });
   }
-  console.log('[context-health] Uninstalled from', GEMINI_CONFIG_DIR);
+  console.log('[agy-cockpit] Uninstalled from', GEMINI_CONFIG_DIR);
 }
 
 function checkStatus() {
@@ -251,7 +251,7 @@ function checkPluginSyncContract() {
       status: 'fail',
       codeSymbol: 'setup.cjs:installAll',
       detail: `Plugin files missing in ${PLUGIN_DEST_DIR}`,
-      fixHint: 'Run node setup.cjs to install Context Health into ~/.gemini/config/plugins/context-health/.'
+      fixHint: 'Run node setup.cjs to install AGY Cockpit into ~/.gemini/config/plugins/agy-cockpit/.'
     };
   }
 
@@ -290,7 +290,7 @@ function checkPluginSyncContract() {
       status: 'warn',
       codeSymbol: 'setup.cjs:installAll',
       detail: `Installed plugin files differ from repository (${diffs.join(', ')} out of sync).`,
-      fixHint: 'Run node setup.cjs to deploy the latest repository files to ~/.gemini/config/plugins/context-health/.'
+      fixHint: 'Run node setup.cjs to deploy the latest repository files to ~/.gemini/config/plugins/agy-cockpit/.'
     };
   }
 
@@ -389,8 +389,8 @@ async function runDoctor(args = []) {
     serverReport = liveProbe.report;
   } else {
     executionMode = 'offline-local';
-    const { ContextHealthServer } = require('./sidecars/context-health/server.cjs');
-    const localSrv = new ContextHealthServer();
+    const { AgyCockpitServer } = require('./sidecars/agy-cockpit/server.cjs');
+    const localSrv = new AgyCockpitServer();
     localSrv.refreshProjectsRegistry(true);
     localSrv.refreshIndex({ force: true });
     localSrv.refreshIndex({ force: false });
@@ -431,7 +431,7 @@ async function runDoctor(args = []) {
     const statusLabel = overallStatus === 'ok'
       ? 'HEALTHY (ALL CONTRACTS PASSED)'
       : (overallStatus === 'warn' ? 'DEGRADED (WARNINGS DETECTED)' : 'BROKEN (CONTRACT FAILURES DETECTED)');
-    console.log(`[context-health doctor] Status: ${statusLabel}`);
+    console.log(`[agy-cockpit doctor] Status: ${statusLabel}`);
     console.log(
       `  Mode          : ${
         liveProbe.reachable
@@ -469,7 +469,7 @@ if (require.main === module) {
     checkStatus();
   } else if (args.includes('--doctor')) {
     runDoctor(args).catch((err) => {
-      console.error('[context-health doctor] Fatal error:', err);
+      console.error('[agy-cockpit doctor] Fatal error:', err);
       process.exit(1);
     });
   } else {

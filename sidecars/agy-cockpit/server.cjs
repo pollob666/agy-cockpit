@@ -9,7 +9,7 @@ const { fileURLToPath, pathToFileURL } = require('node:url');
 
 const BIND_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8091;
-const SIDECAR_NAME = 'context-health';
+const SIDECAR_NAME = 'agy-cockpit';
 const APP_CANDIDATES = ['antigravity', 'antigravity-ide', 'antigravity-cli'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SENDER_UUID_RE = /\bsender=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![/a-z0-9_-])/i;
@@ -314,10 +314,15 @@ function cleanUserPrompt(rawContent) {
   if (reqMatch) {
     text = reqMatch[1];
   } else {
-    text = text
-      .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '')
-      .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/gi, '')
-      .replace(/<EPHEMERAL_MESSAGE>[\s\S]*?<\/EPHEMERAL_MESSAGE>/gi, '');
+    const sysMsgMatch = /^The following is a <SYSTEM_MESSAGE>[\s\S]*?<SYSTEM_MESSAGE[^>]*>\s*([\s\S]*?)\s*<\/SYSTEM_MESSAGE>/i.exec(text);
+    if (sysMsgMatch && sysMsgMatch[1].trim()) {
+      text = sysMsgMatch[1];
+    } else {
+      text = text
+        .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '')
+        .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/gi, '')
+        .replace(/<EPHEMERAL_MESSAGE>[\s\S]*?<\/EPHEMERAL_MESSAGE>/gi, '');
+    }
   }
   return text.replace(/\r\n/g, '\n').trim();
 }
@@ -418,6 +423,7 @@ function createEmptyEntry(convId) {
     isSubagent: false,
     parentConvId: '',
     spawnedSubagentIds: [],
+    subagentRoles: {},
     compactCount: 0,
     lastCompactMs: 0,
     promptsSinceLastCompact: 0,
@@ -442,6 +448,7 @@ function createEmptyEntry(convId) {
     lastStepHasToolCalls: false,
     lastStepWaitKind: '',
     lastStepWaitDelayMs: 0,
+    lastStepWaitToolName: '',
     lastStepMs: 0,
     latestHandoffPrompt: '',
     latestHandoffMs: 0,
@@ -478,21 +485,11 @@ function isTruthyArg(val) {
 
 function classifyToolCallsWait(toolCalls) {
   if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
-    return { kind: '', delayMs: 0 };
+    return { kind: '', delayMs: 0, toolName: '' };
   }
-  let bestKind = '';
-  let bestDelayMs = Infinity;
-
-  const pick = (kind, delayMs) => {
-    if (
-      !bestKind ||
-      delayMs < bestDelayMs ||
-      (delayMs === bestDelayMs && kind === 'permission')
-    ) {
-      bestKind = kind;
-      bestDelayMs = delayMs;
-    }
-  };
+  let hasPermissionTool = false;
+  let maxPermissionDelayMs = 0;
+  let permissionToolName = '';
 
   for (const tc of toolCalls) {
     if (!tc || typeof tc !== 'object') continue;
@@ -500,21 +497,24 @@ function classifyToolCallsWait(toolCalls) {
     const args = tc.args && typeof tc.args === 'object' ? tc.args : {};
 
     if (name === 'ask_question' || name === 'ask_user' || name === 'ask_followup_question') {
-      pick('question', 0);
-      continue;
+      return { kind: 'question', delayMs: 0, toolName: name };
     }
     if (name === 'ask_custom_permission' || name.includes('permission')) {
-      pick('permission', 0);
-      continue;
+      return { kind: 'permission', delayMs: 0, toolName: name };
     }
     if (name === 'run_command') {
-      if (isTruthyArg(args.BypassSandbox)) {
-        pick('permission', 2500);
-      } else {
-        const rawWait = parseInt(String(args.WaitMsBeforeAsync ?? '').replace(/^["'\s]+|["'\s]+$/g, ''), 10);
-        const waitMs = Number.isFinite(rawWait) && rawWait > 0 ? Math.min(Math.max(rawWait, 500), 15000) : 5000;
-        pick('permission', waitMs + 2500);
+      // Antigravity writes PLANNER_RESPONSE when a tool call is emitted, and only writes
+      // the next GENERIC step when the command finishes or hits WaitMsBeforeAsync and gets
+      // backgrounded. Even BypassSandbox: true commands can be auto-approved via Always Allow
+      // and run for up to WaitMsBeforeAsync, whereas commands genuinely awaiting user approval
+      // do not start the WaitMsBeforeAsync timer until the user clicks Allow.
+      const rawWait = parseInt(String(args.WaitMsBeforeAsync ?? '').replace(/^["'\s]+|["'\s]+$/g, ''), 10);
+      const waitMs = Number.isFinite(rawWait) && rawWait > 0 ? Math.min(Math.max(rawWait, 500), 15000) : 5000;
+      hasPermissionTool = true;
+      if (!permissionToolName || waitMs + 3000 >= maxPermissionDelayMs) {
+        permissionToolName = name;
       }
+      maxPermissionDelayMs = Math.max(maxPermissionDelayMs, waitMs + 3000);
       continue;
     }
     if (
@@ -525,15 +525,19 @@ function classifyToolCallsWait(toolCalls) {
       name === 'list_dir' ||
       name === 'delete_file'
     ) {
-      pick('permission', 2500);
+      hasPermissionTool = true;
+      if (!permissionToolName) permissionToolName = name;
+      maxPermissionDelayMs = Math.max(maxPermissionDelayMs, 5000);
     }
   }
 
-  return bestKind ? { kind: bestKind, delayMs: bestDelayMs } : { kind: '', delayMs: 0 };
+  return hasPermissionTool
+    ? { kind: 'permission', delayMs: maxPermissionDelayMs, toolName: permissionToolName }
+    : { kind: '', delayMs: 0, toolName: '' };
 }
 
 function getEntryWaitState(entry, nowMs = Date.now()) {
-  if (!entry || entry.isSubagent) return '';
+  if (!entry) return '';
   if (entry.lastStepType !== 'PLANNER_RESPONSE' || !entry.lastStepHasToolCalls) return '';
   const kind = entry.lastStepWaitKind || '';
   if (kind !== 'permission' && kind !== 'question') return '';
@@ -547,7 +551,7 @@ function getEntryWaitState(entry, nowMs = Date.now()) {
 }
 
 function isEntryThinking(entry, nowMs = Date.now()) {
-  if (!entry || entry.isSubagent) return false;
+  if (!entry) return false;
   if (getEntryWaitState(entry, nowMs)) return false;
   const lastAct = Math.max(entry.mtimeMs || 0, entry.lastStepMs || 0, entry.lastActiveMs || 0);
   if (!lastAct || nowMs - lastAct > 180000) return false;
@@ -596,6 +600,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
     entry.lastStepHasToolCalls = false;
     entry.lastStepWaitKind = '';
     entry.lastStepWaitDelayMs = 0;
+    entry.lastStepWaitToolName = '';
     const tsMatch = /"created_at"\s*:\s*"([^"]+)"/.exec(line);
     if (tsMatch) {
       const tsMs = Date.parse(tsMatch[1]);
@@ -619,6 +624,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
     entry.lastStepHasToolCalls = false;
     entry.lastStepWaitKind = '';
     entry.lastStepWaitDelayMs = 0;
+    entry.lastStepWaitToolName = '';
     return false;
   }
 
@@ -648,13 +654,20 @@ function processTranscriptLine(entry, line, isFirstLine) {
     if (senderMatch) {
       entry.isSubagent = true;
       entry.parentConvId = senderMatch[1].toLowerCase();
+      if (!entry.firstPrompt) {
+        const cleanedSys = cleanUserPrompt(content);
+        if (cleanedSys) {
+          entry.firstPrompt = cleanedSys.slice(0, 500);
+          entry.lastPrompt = entry.firstPrompt;
+        }
+      }
     }
   }
 
   if (type === 'USER_INPUT') {
     const clean = cleanUserPrompt(content);
     if (clean) {
-      if (clean.startsWith('[Context Health Smart Handoff]')) {
+      if (clean.startsWith('[AGY Cockpit Smart Handoff]') || clean.startsWith('[Context Health Smart Handoff]')) {
         entry.awaitingHandoffResponse = true;
         return false;
       }
@@ -670,6 +683,7 @@ function processTranscriptLine(entry, line, isFirstLine) {
       entry.lastStepHasToolCalls = false;
       entry.lastStepWaitKind = '';
       entry.lastStepWaitDelayMs = 0;
+      entry.lastStepWaitToolName = '';
       if (createdMs > 0) {
         entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
       }
@@ -701,12 +715,13 @@ function processTranscriptLine(entry, line, isFirstLine) {
     const hasTools = Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0;
     const stepStatus = typeof obj.status === 'string' ? obj.status : 'DONE';
     const wasAwaitingHandoff = Boolean(entry.awaitingHandoffResponse);
-    const waitSpec = hasTools ? classifyToolCallsWait(obj.tool_calls) : { kind: '', delayMs: 0 };
+    const waitSpec = hasTools ? classifyToolCallsWait(obj.tool_calls) : { kind: '', delayMs: 0, toolName: '' };
     entry.lastStepType = 'PLANNER_RESPONSE';
     entry.lastStepStatus = stepStatus;
     entry.lastStepHasToolCalls = hasTools;
     entry.lastStepWaitKind = waitSpec.kind;
     entry.lastStepWaitDelayMs = waitSpec.delayMs;
+    entry.lastStepWaitToolName = waitSpec.toolName || '';
     if (createdMs > 0) {
       entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
     }
@@ -784,9 +799,16 @@ function processTranscriptLine(entry, line, isFirstLine) {
       }
     }
 
+    entry.pendingSubagentRoles = [];
     if (Array.isArray(obj.tool_calls)) {
       if (!entry.workspaceCounts || typeof entry.workspaceCounts !== 'object') {
         entry.workspaceCounts = {};
+      }
+      for (const tc of obj.tool_calls) {
+        if (tc && tc.name === 'invoke_subagent' && tc.args && typeof tc.args === 'object') {
+          const role = tc.args.Role || tc.args.role || tc.args.TypeName || tc.args.type_name || '';
+          entry.pendingSubagentRoles.push(typeof role === 'string' ? role.trim() : '');
+        }
       }
       const rawPaths = extractPathsFromToolCalls(obj.tool_calls);
       for (const rp of rawPaths) {
@@ -853,15 +875,20 @@ function processTranscriptLine(entry, line, isFirstLine) {
     entry.lastStepHasToolCalls = false;
     entry.lastStepWaitKind = '';
     entry.lastStepWaitDelayMs = 0;
+    entry.lastStepWaitToolName = '';
     if (createdMs > 0) {
       entry.lastStepMs = Math.max(entry.lastStepMs || 0, createdMs);
     }
     if (type === 'GENERIC' && hasSubagentCreation) {
       const m = CHILD_CONV_RE.exec(content);
+      const role = Array.isArray(entry.pendingSubagentRoles) ? entry.pendingSubagentRoles.shift() : '';
       if (m && UUID_RE.test(m[1])) {
         const childId = m[1].toLowerCase();
         if (childId !== entry.id && !entry.spawnedSubagentIds.includes(childId)) {
           entry.spawnedSubagentIds.push(childId);
+        }
+        if (role) {
+          (entry.subagentRoles || (entry.subagentRoles = {}))[childId] = role;
         }
       }
     } else if (type === 'SYSTEM_MESSAGE' && !entry.isSubagent) {
@@ -1136,6 +1163,11 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
   const bytesToRead = stat.size - startOffset;
 
   if (bytesToRead <= 0) {
+    if (existingEntry) {
+      existingEntry.mtimeMs = stat.mtimeMs;
+      existingEntry.size = stat.size;
+      return { entry: existingEntry, changed: false };
+    }
     entry.mtimeMs = stat.mtimeMs;
     entry.size = stat.size;
     return { entry, changed: false };
@@ -1160,6 +1192,11 @@ function updateTranscriptEntry(convId, transcriptPath, existingEntry, preStat) {
   if (lastNewlineIdx < 0) {
     const trimmedBuf = buf.toString('utf-8').trim();
     if (!trimmedBuf) {
+      if (existingEntry) {
+        existingEntry.mtimeMs = stat.mtimeMs;
+        existingEntry.size = stat.size;
+        return { entry: existingEntry, changed: false };
+      }
       entry.mtimeMs = stat.mtimeMs;
       entry.size = stat.size;
       return { entry, changed: false };
@@ -1493,6 +1530,12 @@ const LSRPC_CONTRACT_SPECS = [
     critical: false,
     caller: 'server.cjs:deleteConversation',
     purpose: 'Delete trajectory via RPC (falls back to on-disk brain/conversations/annotations removal)'
+  },
+  {
+    method: 'CancelCascadeInvocation',
+    critical: false,
+    caller: 'server.cjs:handleRequest (POST /api/cancel-invocation)',
+    purpose: 'Abort active cascade invocation when cancelling smart handoff generation'
   }
 ];
 
@@ -1937,13 +1980,13 @@ function buildAgentHandoffRequest(entry, focusTopic) {
     : `Scope the handoff prompt strictly to the active, unfinished task or immediate next step from the latest turns of our conversation.`;
 
   return (
-    `[Context Health Smart Handoff]\n` +
+    `[AGY Cockpit Smart Handoff]\n` +
     `Create a self-contained, high-signal handoff prompt so we can continue seamlessly in a fresh conversation.\n\n` +
     `${focusDirective}\n\n` +
     `STRICT RULES:\n` +
     `1. Do NOT call any tools (no read_file, no run_command, no search). You already have all required context in memory. Respond immediately.\n` +
     `2. Write the entire handoff prompt in the SAME language the user has been using in this conversation (unless the user explicitly requested a different language above).\n` +
-    `3. Wrap the final handoff prompt strictly inside <HANDOFF_PROMPT> and </HANDOFF_PROMPT> tags. As soon as you finish your response, the Context Health sidecar will automatically extract the content inside those tags and load it into the review editor.\n` +
+    `3. Wrap the final handoff prompt strictly inside <HANDOFF_PROMPT> and </HANDOFF_PROMPT> tags. As soon as you finish your response, the AGY Cockpit sidecar will automatically extract the content inside those tags and load it into the review editor.\n` +
     `4. Ignore any earlier <HANDOFF_PROMPT> blocks that may exist higher up in this conversation's history. Do NOT copy or carry over old sections from them; write a fresh, tightly scoped prompt for the current target task.\n` +
     `5. Maximize signal-to-noise ratio. Do NOT write a session changelog or historical summary of unrelated tasks that were already completed earlier in this conversation (the files on disk already reflect completed changes). Mention prior work ONLY if it is partially finished, uncommitted in a way that affects the next step, or has a direct technical dependency or side-effect on the immediate task.\n` +
     `6. Inside <HANDOFF_PROMPT>...</HANDOFF_PROMPT> include ONLY:\n` +
@@ -1962,7 +2005,7 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-class ContextHealthServer {
+class AgyCockpitServer {
   constructor(options = {}) {
     this.appDataDir = options.appDataDir || resolveAppDataDir();
     this.brainDir = options.brainDir || path.join(this.appDataDir, 'brain');
@@ -2023,7 +2066,17 @@ class ContextHealthServer {
     this.indexCachePath = path.join(this.dataDir, 'index_cache.json');
     this.metadataCachePath = path.join(this.dataDir, 'metadata_cache.json');
     this.diagnosticsCachePath = path.join(this.dataDir, 'diagnostics_cache.json');
+    this.archivedDataPath = path.join(this.dataDir, 'archived.json');
     this.serverInfoPath = path.join(this.dataDir, 'server_info.json');
+
+    this.pinnedConversations = new Map();
+    this.customTitles = new Map();
+    this.archivedDataRaw = {
+      archivedProjects: [],
+      archivedConversations: [],
+      pinnedConversations: {},
+      customTitles: {}
+    };
 
     try {
       this.bootScriptMtimeMs = fs.statSync(__filename).mtimeMs;
@@ -2034,7 +2087,66 @@ class ContextHealthServer {
     this.loadPersistentCaches();
   }
 
+  loadArchivedData() {
+    if (!isFile(this.archivedDataPath)) return;
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.archivedDataPath, 'utf-8'));
+      if (!raw || typeof raw !== 'object') return;
+      this.archivedDataRaw = {
+        archivedProjects: Array.isArray(raw.archivedProjects) ? raw.archivedProjects : [],
+        archivedConversations: Array.isArray(raw.archivedConversations) ? raw.archivedConversations : [],
+        pinnedConversations: {},
+        customTitles: {}
+      };
+      this.pinnedConversations.clear();
+      if (raw.pinnedConversations && typeof raw.pinnedConversations === 'object') {
+        if (Array.isArray(raw.pinnedConversations)) {
+          const nowMs = Date.now();
+          for (const id of raw.pinnedConversations) {
+            if (typeof id === 'string' && UUID_RE.test(id.trim())) {
+              this.pinnedConversations.set(id.trim().toLowerCase(), nowMs);
+            }
+          }
+        } else {
+          for (const [k, v] of Object.entries(raw.pinnedConversations)) {
+            const cleanId = k.trim().toLowerCase();
+            if (UUID_RE.test(cleanId) && v) {
+              const ts = typeof v === 'number' && v > 0 ? v : Date.now();
+              this.pinnedConversations.set(cleanId, ts);
+            }
+          }
+        }
+      }
+      this.customTitles.clear();
+      if (raw.customTitles && typeof raw.customTitles === 'object' && !Array.isArray(raw.customTitles)) {
+        for (const [k, v] of Object.entries(raw.customTitles)) {
+          const cleanId = k.trim().toLowerCase();
+          const cleanTitle = typeof v === 'string' ? v.trim() : '';
+          if (UUID_RE.test(cleanId) && cleanTitle) {
+            this.customTitles.set(cleanId, cleanTitle);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  saveArchivedData() {
+    try {
+      const pinnedObj = Object.fromEntries(this.pinnedConversations.entries());
+      const titlesObj = Object.fromEntries(this.customTitles.entries());
+      const payload = {
+        ...(this.archivedDataRaw || {}),
+        pinnedConversations: pinnedObj,
+        customTitles: titlesObj,
+        updatedAtMs: Date.now()
+      };
+      this.archivedDataRaw = payload;
+      writeJsonAtomic(this.archivedDataPath, payload, undefined, true);
+    } catch {}
+  }
+
   loadPersistentCaches() {
+    this.loadArchivedData();
     if (isFile(this.diagnosticsCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.diagnosticsCachePath, 'utf-8'));
@@ -2063,7 +2175,7 @@ class ContextHealthServer {
     if (isFile(this.indexCachePath)) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.indexCachePath, 'utf-8'));
-        if (raw && raw.version === 14 && Array.isArray(raw.entries)) {
+        if (raw && raw.version === 15 && Array.isArray(raw.entries)) {
           for (const item of raw.entries) {
             if (item && typeof item.id === 'string') {
               item.lastUserInputMs = item.lastUserInputMs || 0;
@@ -2076,7 +2188,9 @@ class ContextHealthServer {
               item.lastStepHasToolCalls = Boolean(item.lastStepHasToolCalls);
               item.lastStepWaitKind = item.lastStepWaitKind || '';
               item.lastStepWaitDelayMs = item.lastStepWaitDelayMs || 0;
+              item.lastStepWaitToolName = item.lastStepWaitToolName || '';
               item.lastStepMs = item.lastStepMs || 0;
+              item.subagentRoles = item.subagentRoles && typeof item.subagentRoles === 'object' ? item.subagentRoles : {};
               item.modelEnum = item.modelEnum || '';
               item.modelLabel = item.modelLabel || '';
               item.modelResolvedMtimeMs = item.modelResolvedMtimeMs || 0;
@@ -2100,7 +2214,7 @@ class ContextHealthServer {
     this.indexCacheDirty = false;
     try {
       const entries = [...this.convCache.values()];
-      writeJsonAtomic(this.indexCachePath, { version: 14, savedAt: Date.now(), entries });
+      writeJsonAtomic(this.indexCachePath, { version: 15, savedAt: Date.now(), entries });
     } catch {}
   }
 
@@ -2406,8 +2520,10 @@ class ContextHealthServer {
       this.saveMetadataCache();
     }
     this.annotationTitleCache.delete(cleanId);
-    if (this.metadataWorkspaceCache.delete(cleanId)) {
-      this.saveMetadataCache();
+    const hadPin = this.pinnedConversations.delete(cleanId);
+    const hadTitle = this.customTitles.delete(cleanId);
+    if (hadPin || hadTitle) {
+      this.saveArchivedData();
     }
     this.lastFullScanMs = 0;
     this.lastBrainDirMtimeMs = 0;
@@ -2422,6 +2538,67 @@ class ContextHealthServer {
         ok: true,
         conversationId: cleanId,
         rpcOk: Boolean(!rpcResult || !rpcResult.error)
+      }
+    };
+  }
+
+  setConversationPinned(convId, pinned) {
+    const cleanId = (convId || '').trim().toLowerCase();
+    if (!UUID_RE.test(cleanId)) {
+      return { status: 400, body: { error: 'Invalid conversation id' } };
+    }
+    const nextPinned = Boolean(pinned);
+    let pinnedAtMs = 0;
+    if (nextPinned) {
+      pinnedAtMs = Date.now();
+      this.pinnedConversations.set(cleanId, pinnedAtMs);
+    } else {
+      this.pinnedConversations.delete(cleanId);
+    }
+    this.saveArchivedData();
+    this.transcriptRev += 1;
+    this.cachedCardsState = null;
+    this.stateVersion += 1;
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        id: cleanId,
+        conversationId: cleanId,
+        pinned: nextPinned,
+        pinnedAtMs
+      }
+    };
+  }
+
+  setConversationCustomTitle(convId, title) {
+    const cleanId = (convId || '').trim().toLowerCase();
+    if (!UUID_RE.test(cleanId)) {
+      return { status: 400, body: { error: 'Invalid conversation id' } };
+    }
+    const cleanTitle = typeof title === 'string' ? title.trim() : '';
+    if (cleanTitle) {
+      this.customTitles.set(cleanId, cleanTitle);
+    } else {
+      this.customTitles.delete(cleanId);
+    }
+    this.saveArchivedData();
+    this.transcriptRev += 1;
+    this.cachedCardsState = null;
+    this.stateVersion += 1;
+    const entry = this.convCache.get(cleanId);
+    const defaultTitle = entry
+      ? (entry.title || entry.firstPrompt || entry.lastPrompt || ('Conversation ' + cleanId.slice(0, 8)))
+      : '';
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        id: cleanId,
+        conversationId: cleanId,
+        customTitle: cleanTitle,
+        title: cleanTitle || (entry && entry.title) || '',
+        defaultTitle
       }
     };
   }
@@ -2706,8 +2883,16 @@ class ContextHealthServer {
         }
         this.initialBootScanDone = true;
 
-        for (const cachedId of this.convCache.keys()) {
+        for (const [cachedId, cachedEntry] of this.convCache.entries()) {
           if (!seenIds.has(cachedId)) {
+            if (
+              cachedEntry &&
+              !this.deletedConvIds.has(cachedId) &&
+              now - (cachedEntry.lastUserInputMs || 0) < 60000 &&
+              this.metadataWorkspaceCache.has(cachedId)
+            ) {
+              continue;
+            }
             this.convCache.delete(cachedId);
             anyTranscriptChanged = true;
           }
@@ -2732,6 +2917,7 @@ class ContextHealthServer {
           if (isHot) {
             hotIds.add(entry.id);
             if (!entry.isSubagent) mainChecked += 1;
+            if (entry.parentConvId) hotIds.add(entry.parentConvId);
             for (const subId of entry.spawnedSubagentIds || []) {
               hotIds.add(subId);
             }
@@ -2741,6 +2927,12 @@ class ContextHealthServer {
         for (const convId of hotIds) {
           if (this.refreshEntryById(convId, activeConvId, activeWorkspaceNorm, false)) {
             anyTranscriptChanged = true;
+          }
+          const hotEntry = this.convCache.get(convId);
+          for (const subId of (hotEntry && hotEntry.spawnedSubagentIds) || []) {
+            if (!this.convCache.has(subId) && this.refreshEntryById(subId, activeConvId, activeWorkspaceNorm, false)) {
+              anyTranscriptChanged = true;
+            }
           }
         }
 
@@ -3033,7 +3225,7 @@ class ContextHealthServer {
         detail: isFail
           ? 'Simulated failure: RPC GetCascadeModelConfigData not found in language_server binary.'
           : 'Simulated warning: RPC DeleteCascadeTrajectory not found in language_server binary (using disk fallback).',
-        fixHint: 'Update RPC method name in sidecars/context-health/server.cjs (callLanguageServerRpc callers).'
+        fixHint: 'Update RPC method name in sidecars/agy-cockpit/server.cjs (callLanguageServerRpc callers).'
       };
       return {
         status: isFail ? 'fail' : 'warn',
@@ -3126,6 +3318,8 @@ class ContextHealthServer {
       let userStepsCount = 0;
       let plannerStepsCount = 0;
       let plannerWithTokensCount = 0;
+      let toolCallsCount = 0;
+      let validToolCallsCount = 0;
       let truncatedWithoutFullCount = 0;
 
       if (brainDirExists) {
@@ -3169,6 +3363,14 @@ class ContextHealthServer {
                 ) {
                   plannerWithTokensCount += 1;
                 }
+                if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
+                  for (const tc of obj.tool_calls) {
+                    toolCallsCount += 1;
+                    if (tc && typeof tc.name === 'string' && tc.args && typeof tc.args === 'object') {
+                      validToolCallsCount += 1;
+                    }
+                  }
+                }
               }
               if (Array.isArray(obj.truncated_fields) && obj.truncated_fields.length > 0) {
                 const fullPath = path.join(path.dirname(item.trPath), 'transcript_full.jsonl');
@@ -3208,6 +3410,15 @@ class ContextHealthServer {
           `Found ${plannerStepsCount} PLANNER_RESPONSE steps across ${transcriptsFound} transcripts, but none had input_tokens/cache_read_tokens/output_tokens.`,
           'Token usage field names in transcript.jsonl may have changed. Update token extraction in server.cjs:processTranscriptLine().'
         );
+      } else if (toolCallsCount >= 3 && validToolCallsCount === 0) {
+        addContract(
+          'transcript_schema',
+          'Conversation Transcript JSONL Schema',
+          'warn',
+          'server.cjs:classifyToolCallsWait, extractPathsFromToolCalls, processTranscriptLine',
+          `Found ${toolCallsCount} tool_calls entries across ${transcriptsFound} transcripts, but none matched { name, args }.`,
+          'Tool call schema in PLANNER_RESPONSE changed. Update classifyToolCallsWait() and processTranscriptLine() in server.cjs.'
+        );
       } else if (truncatedWithoutFullCount > 0) {
         addContract(
           'transcript_schema',
@@ -3222,8 +3433,8 @@ class ContextHealthServer {
           'transcript_schema',
           'Conversation Transcript JSONL Schema',
           'pass',
-          'server.cjs:processTranscriptLine, updateTranscriptEntry',
-          `Verified ${transcriptsFound} recent transcript(s) (${userStepsCount} USER_INPUT, ${plannerWithTokensCount}/${plannerStepsCount} PLANNER_RESPONSE with token fields).`
+          'server.cjs:processTranscriptLine, classifyToolCallsWait',
+          `Verified ${transcriptsFound} recent transcript(s) (${userStepsCount} USER_INPUT, ${plannerWithTokensCount}/${plannerStepsCount} PLANNER_RESPONSE with tokens, ${validToolCallsCount}/${toolCallsCount} tool_calls).`
         );
       }
 
@@ -3312,9 +3523,11 @@ class ContextHealthServer {
 
       const lsBinPath = resolveLanguageServerBinary(this.appDataDir);
       const rpcMethodNames = LSRPC_CONTRACT_SPECS.map((s) => s.method);
+      const subagentSymbols = ['Created the following subagent', 'invoke_subagent'];
       const allSymbolsToScan = [
         'LanguageServerService',
         ...rpcMethodNames,
+        ...subagentSymbols,
         'send-message',
         'new-conversation'
       ];
@@ -3348,8 +3561,12 @@ class ContextHealthServer {
       } else {
         const missingCritical = LSRPC_CONTRACT_SPECS
           .filter((s) => s.critical && !binScan.found.has(s.method));
-        const missingOptional = LSRPC_CONTRACT_SPECS
-          .filter((s) => !s.critical && !binScan.found.has(s.method));
+        const missingOptional = [
+          ...LSRPC_CONTRACT_SPECS.filter((s) => !s.critical && !binScan.found.has(s.method)),
+          ...subagentSymbols
+            .filter((sym) => !binScan.found.has(sym))
+            .map((sym) => ({ method: sym, caller: 'processTranscriptLine (subagents)' }))
+        ];
         const hasService = binScan.found.has('LanguageServerService');
 
         if (!hasService || missingCritical.length > 0) {
@@ -3371,17 +3588,17 @@ class ContextHealthServer {
             'language_server_binary',
             'Language Server Binary & RPC Symbols',
             'warn',
-            'server.cjs:callLanguageServerRpc',
-            `Missing optional RPC symbol(s) in language_server binary (fallbacks active): ${missingOptional.map((m) => `${m.method} [${m.caller}]`).join('; ')}`,
-            'Update renamed RPC method(s) in server.cjs so primary RPC path works without relying on CLI/disk fallback.'
+            'server.cjs:callLanguageServerRpc, processTranscriptLine',
+            `Missing optional symbol(s) in language_server binary: ${missingOptional.map((m) => `${m.method} [${m.caller}]`).join('; ')}`,
+            'Update renamed RPC method(s) or subagent markers in server.cjs.'
           );
         } else {
           addContract(
             'language_server_binary',
             'Language Server Binary & RPC Symbols',
             'pass',
-            'server.cjs:callLanguageServerRpc',
-            `All ${rpcMethodNames.length} RPC methods + LanguageServerService verified in ${path.basename(lsBinPath)}.`
+            'server.cjs:callLanguageServerRpc, processTranscriptLine',
+            `All ${rpcMethodNames.length} RPC methods + subagent symbols + LanguageServerService verified in ${path.basename(lsBinPath)}.`
           );
         }
       }
@@ -3615,6 +3832,47 @@ class ContextHealthServer {
     return runPromise;
   }
 
+  resolveSubagentsState(entry, nowMs = Date.now()) {
+    let waitState = getEntryWaitState(entry, nowMs);
+    let waitToolName = waitState ? (entry.lastStepWaitToolName || '') : '';
+    let isThinking = !waitState && isEntryThinking(entry, nowMs);
+    const subagents = [];
+    const seen = new Set();
+    for (const rawId of entry.spawnedSubagentIds || []) {
+      const childId = typeof rawId === 'string' ? rawId.trim().toLowerCase() : '';
+      if (!childId || seen.has(childId)) continue;
+      seen.add(childId);
+      const child = this.convCache.get(childId);
+      if (!child) continue;
+      const cw = getEntryWaitState(child, nowMs);
+      const cwTool = cw ? (child.lastStepWaitToolName || '') : '';
+      const ct = !cw && isEntryThinking(child, nowMs);
+      const fallback = (child.firstPrompt || child.lastPrompt || '').split('\n')[0].trim().slice(0, 80);
+      const title =
+        this.customTitles.get(child.id) ||
+        (entry.subagentRoles && entry.subagentRoles[child.id]) ||
+        child.title ||
+        fallback ||
+        ('Subagent ' + child.id.slice(0, 8));
+      subagents.push({
+        id: child.id,
+        title,
+        totalTokens: child.totalTokens || 0,
+        isThinking: ct,
+        waitState: cw,
+        waitToolName: cwTool
+      });
+      if (cw && !waitState) {
+        waitState = cw;
+        waitToolName = cwTool;
+        isThinking = false;
+      } else if (ct && !waitState) {
+        isThinking = true;
+      }
+    }
+    return { waitState, waitToolName, isThinking, subagents };
+  }
+
   buildConversationCard(entry, globalObservedCeiling, subagentTokens) {
     const verbatimPrompts = entry.compactCount > 0
       ? Math.min(10, entry.promptCount)
@@ -3643,8 +3901,8 @@ class ContextHealthServer {
       ? matchedProj.name
       : getWorkspaceLabel(effectiveWsPath);
 
-    const waitState = getEntryWaitState(entry);
-    const isThinking = !waitState && isEntryThinking(entry);
+    const { waitState, waitToolName, isThinking, subagents } = this.resolveSubagentsState(entry);
+
     const seenBaselineMs = Math.max(
       entry.lastSeenMs || 0,
       entry.lastViewMs || 0,
@@ -3657,10 +3915,20 @@ class ContextHealthServer {
         entry.markedAsUnread)
     );
 
+    const pinnedAtMs = this.pinnedConversations.get(entry.id) || 0;
+    const pinned = pinnedAtMs > 0;
+    const customTitle = this.customTitles.get(entry.id) || '';
+    const defaultTitle =
+      entry.title ||
+      entry.firstPrompt ||
+      entry.lastPrompt ||
+      ('Conversation ' + entry.id.slice(0, 8));
+
     return {
       id: entry.id,
       isSubagent: !!entry.isSubagent,
       subagentTokens: subagentTokens ? (subagentTokens.get(entry.id) || 0) : 0,
+      subagents,
       projectId: matchedProj ? matchedProj.id : '',
       workspacePath: effectiveWsPath,
       workspaceKey: effectiveWsKey,
@@ -3687,13 +3955,18 @@ class ContextHealthServer {
       observedCeiling,
       ceilingExceeded,
       contextRatio,
-      title: entry.title || '',
+      pinned,
+      pinnedAtMs,
+      customTitle,
+      defaultTitle,
+      title: customTitle || entry.title || '',
       firstPrompt: entry.firstPrompt || '',
       lastPrompt: entry.lastPrompt || '',
       lastModelResponse: entry.lastModelResponse || '',
       lastModelResponseMs: entry.lastModelResponseMs || 0,
       isThinking,
       waitState,
+      waitToolName,
       unread,
       modelEnum: entry.modelEnum || '',
       modelLabel: entry.modelLabel || this.lookupModelLabel(entry.modelEnum) || '',
@@ -3737,7 +4010,8 @@ class ContextHealthServer {
     const viewedConvId = (query.viewedConvId || '').trim().toLowerCase();
     if (UUID_RE.test(viewedConvId)) {
       const viewedEntry = this.convCache.get(viewedConvId);
-      if (viewedEntry && !isEntryThinking(viewedEntry) && !getEntryWaitState(viewedEntry)) {
+      const viewedState = viewedEntry ? this.resolveSubagentsState(viewedEntry) : null;
+      if (viewedState && !viewedState.isThinking && !viewedState.waitState) {
         this.markConversationSeen(viewedConvId);
       }
     }
@@ -3759,12 +4033,12 @@ class ContextHealthServer {
       for (let i = 0; i < this.cachedCardsState.cards.length; i++) {
         const c = this.cachedCardsState.cards[i];
         const e = this.cachedCardsState.visibleEntries[i];
-        if (
-          c &&
-          e &&
-          (Boolean(c.isThinking) !== isEntryThinking(e, checkNowMs) ||
-            (c.waitState || '') !== getEntryWaitState(e, checkNowMs))
-        ) {
+        if (!c || !e) continue;
+        const st = this.resolveSubagentsState(e, checkNowMs);
+        const subChanged =
+          c.subagents.length !== st.subagents.length ||
+          c.subagents.some((s, idx) => s.isThinking !== st.subagents[idx].isThinking || s.waitState !== st.subagents[idx].waitState);
+        if (subChanged || Boolean(c.isThinking) !== st.isThinking || (c.waitState || '') !== st.waitState) {
           this.cachedCardsState = null;
           break;
         }
@@ -3805,9 +4079,17 @@ class ContextHealthServer {
           const effectiveWsName = matchedProj
             ? matchedProj.name
             : getWorkspaceLabel(effectiveWsPath);
+          const archCustomTitle = this.customTitles.get(e.id) || '';
+          const archDefaultTitle =
+            e.title ||
+            e.firstPrompt ||
+            e.lastPrompt ||
+            ('Conversation ' + e.id.slice(0, 8));
           archivedConversations.push({
             id: e.id,
-            title: e.title || '',
+            title: archCustomTitle || e.title || '',
+            customTitle: archCustomTitle,
+            defaultTitle: archDefaultTitle,
             firstPrompt: e.firstPrompt || '',
             lastPrompt: e.lastPrompt || '',
             workspaceName: effectiveWsName,
@@ -3905,6 +4187,9 @@ class ContextHealthServer {
         items: cards.map((c) => [
           c.id,
           c.title,
+          c.customTitle,
+          c.pinned,
+          c.pinnedAtMs,
           c.lastActiveMs,
           c.lastUserInputMs,
           c.lastViewMs,
@@ -3925,8 +4210,10 @@ class ContextHealthServer {
           c.lastModelResponseMs,
           c.isThinking,
           c.waitState,
+          c.waitToolName,
           c.unread,
-          c.git.commitsBehind
+          c.git.commitsBehind,
+          c.subagents.map((s) => [s.id, s.title, s.totalTokens, s.isThinking, s.waitState, s.waitToolName])
         ])
       });
 
@@ -3995,7 +4282,10 @@ class ContextHealthServer {
     if (rawSearch) {
       searchMatches = {};
       for (const entry of visibleEntries) {
-        if (!entry.searchCorpusLower || !entry.searchCorpusLower.includes(rawSearch)) continue;
+        const customTitleLower = (this.customTitles.get(entry.id) || '').toLowerCase();
+        const corpusHit = Boolean(entry.searchCorpusLower && entry.searchCorpusLower.includes(rawSearch));
+        const customTitleHit = Boolean(customTitleLower && customTitleLower.includes(rawSearch));
+        if (!corpusHit && !customTitleHit) continue;
         const matchingPrompts = [];
         for (const p of entry.prompts) {
           if (p.text.toLowerCase().includes(rawSearch)) {
@@ -4261,8 +4551,49 @@ class ContextHealthServer {
 
     if (req.method === 'POST' && pathname === '/api/conversation-delete') {
       const body = await this.readJsonBody(req);
-      const { status, body: outBody } = await this.deleteConversation(body.conversationId);
+      const { status, body: outBody } = await this.deleteConversation(body.conversationId || body.id);
       sendJson(res, status, outBody);
+      return;
+    }
+
+    if (
+      req.method === 'POST' &&
+      (pathname === '/api/pin-conversation' || pathname === '/api/conversation-pin')
+    ) {
+      const body = await this.readJsonBody(req);
+      const targetId = body.id || body.conversationId || '';
+      const { status, body: outBody } = this.setConversationPinned(targetId, body.pinned);
+      sendJson(res, status, outBody);
+      return;
+    }
+
+    if (
+      req.method === 'POST' &&
+      (pathname === '/api/rename-conversation' || pathname === '/api/conversation-rename')
+    ) {
+      const body = await this.readJsonBody(req);
+      const targetId = body.id || body.conversationId || '';
+      const { status, body: outBody } = this.setConversationCustomTitle(targetId, body.title);
+      sendJson(res, status, outBody);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/cancel-invocation') {
+      const body = await this.readJsonBody(req);
+      const rawId = body.conversationId || body.id || '';
+      const convId = typeof rawId === 'string' ? rawId.trim().toLowerCase() : '';
+      if (!UUID_RE.test(convId)) {
+        sendJson(res, 400, { error: 'Invalid conversationId' });
+        return;
+      }
+      const entry = this.convCache.get(convId);
+      if (entry) {
+        entry.awaitingHandoffResponse = false;
+        entry.needsFullHandoffRead = false;
+        entry.handoffTargetStepIndex = -1;
+      }
+      const rpcRes = await callLanguageServerRpc('CancelCascadeInvocation', { cascadeId: convId }, 4000);
+      sendJson(res, 200, { ok: Boolean(!rpcRes || !rpcRes.error) });
       return;
     }
 
@@ -4305,17 +4636,22 @@ class ContextHealthServer {
       const srcEntry = UUID_RE.test(srcConvId)
         ? (this.convCache.get(srcConvId) || this.refreshSingleEntry(srcConvId))
         : null;
+      const requestedProjectId =
+        !isGeneral && typeof body.projectId === 'string' && UUID_RE.test(body.projectId.trim())
+          ? body.projectId.trim().toLowerCase()
+          : '';
+      const requestedProj = requestedProjectId ? this.projectsRegistry.get(requestedProjectId) : null;
       const rawWsPath = isGeneral
         ? ''
         : ((typeof body.workspacePath === 'string' && body.workspacePath.trim()) ||
+           (requestedProj && requestedProj.primaryPath) ||
            (srcEntry && srcEntry.workspacePath) ||
            '');
       const normWsPath = rawWsPath ? resolveCanonicalWorkspace(rawWsPath) : '';
-      const matchedProj = normWsPath ? this.matchProjectForWorkspace(normWsPath) : null;
+      const matchedProj = (normWsPath ? this.matchProjectForWorkspace(normWsPath) : null) || requestedProj || null;
       const effectiveProjectId = isGeneral
         ? ''
-        : ((typeof body.projectId === 'string' && body.projectId.trim()) ||
-           (matchedProj ? matchedProj.id : ''));
+        : (requestedProjectId || (matchedProj ? matchedProj.id : ''));
       const effectiveWsPath = isGeneral
         ? ''
         : (normWsPath || (matchedProj && matchedProj.primaryPath) || '');
@@ -4423,6 +4759,7 @@ class ContextHealthServer {
         '';
       const cascadeId = rawCascadeId.trim().toLowerCase();
       if (cascadeId && UUID_RE.test(cascadeId)) {
+        seedNewConversation(cascadeId);
         const sendPayload = {
           cascadeId,
           items: [{ text: message }],
@@ -4535,9 +4872,9 @@ class ContextHealthServer {
 }
 
 if (require.main === module) {
-  const instance = new ContextHealthServer();
+  const instance = new AgyCockpitServer();
   instance.start().catch((err) => {
-    console.error('[context-health] Fatal startup error:', err);
+    console.error('[agy-cockpit] Fatal startup error:', err);
     process.exit(1);
   });
 
@@ -4549,7 +4886,8 @@ if (require.main === module) {
 }
 
 module.exports = {
-  ContextHealthServer,
+  AgyCockpitServer,
+  ContextHealthServer: AgyCockpitServer,
   LSRPC_CONTRACT_SPECS,
   resolveLanguageServerBinary,
   scanBinarySymbols,
