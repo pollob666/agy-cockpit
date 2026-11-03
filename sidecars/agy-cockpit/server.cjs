@@ -2694,9 +2694,9 @@ function parseCascadeModelConfigs(data) {
 }
 
 const QUOTA_FAMILY_RULES = [
-  { key: 'gemini', label: 'Google Gemini', re: /\b(?:gemini|google)\b/i, excludeRe: /\bargon\b/i },
+  { key: 'gemini', label: 'Google Gemini', re: /gemini|google/i, excludeRe: /argon/i },
   { key: 'claude', label: 'Anthropic Claude', re: /claude|anthropic|opus|sonnet|haiku/i },
-  { key: 'argon', label: 'Gemini 4 Argon', re: /\bargon\b/i },
+  { key: 'argon', label: 'Gemini 4 Argon', re: /argon/i },
   { key: 'openai', label: 'OpenAI', re: /openai|\bgpt|codex/i }
 ];
 
